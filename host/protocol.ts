@@ -55,7 +55,12 @@ export function validateRpc(value: unknown): { method: Method; params: Params } 
   const params = value.params as Params | undefined ?? {};
   const text = (key: string, required = true, max = 200): boolean =>
     (!required && params[key] === undefined) || (typeof params[key] === 'string' && (params[key] as string).length > 0 && (params[key] as string).length <= max);
-  const valid = method === 'action' ? text('id') : method === 'key' ? typeof params.key === 'string' && ['up', 'down', 'left', 'right', 'enter', 'back', 'long'].includes(params.key) :
+  const filters = ['text', 'key', 'section'].filter(key => Object.hasOwn(params, key));
+  const validFilter = filters.every(key => text(key));
+  const valid = method === 'action' ? validFilter && (Object.hasOwn(params, 'id') ? text('id') && filters.length === 0 && Object.keys(params).length === 1 : filters.length === 1 && Object.keys(params).length === 1) :
+    method === 'ui' ? validFilter && filters.length <= 1 && Object.keys(params).every(key => ['text', 'key', 'section', 'full', 'limit'].includes(key)) &&
+      (params.full === undefined || typeof params.full === 'boolean') && (params.limit === undefined || Number.isInteger(params.limit) && Number(params.limit) >= 1 && Number(params.limit) <= 150) :
+    method === 'key' ? typeof params.key === 'string' && ['up', 'down', 'left', 'right', 'enter', 'back', 'long'].includes(params.key) :
     method === 'input' ? params.text === undefined || (typeof params.text === 'string' && params.text.length <= 4096) :
     method === 'settings.get' ? text('key', false) : method === 'settings.set' ? text('key') && typeof params.value === 'boolean' :
     method === 'settings.open' ? text('section', false) && (params.section === undefined || /^[a-z0-9_-]+$/i.test(String(params.section))) : true;

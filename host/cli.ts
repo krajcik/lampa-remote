@@ -7,6 +7,7 @@ import { createBridge } from './bridge.js';
 import { Adb } from './adb.js';
 import { config, releaseLock, stateDir } from './state.js';
 import { doctor, ensureBridge, ensurePeer, health, lease, request } from './runtime.js';
+import { parseAgent, waitForState } from './agent-commands.js';
 import { Envelope, Params, RemoteError, exitFor, failure, isObject, success, validateRpc, version } from './protocol.js';
 export { config, stateDir } from './state.js';
 export { request } from './runtime.js';
@@ -22,8 +23,14 @@ Bridge:
   install-url                    Write installation URL to private state file
 
 Lampa (must already be running):
-  status | ui | player            Read plugin state, visible UI, or video state
-  action ID                      Activate a target from the latest UI snapshot
+  status | player                Read plugin or video state
+  ui [--full] [--limit 1..150] [--text TEXT | --key KEY | --section SECTION]
+                                 Compact UI (default limit50); text substring filter
+  action ID | --text TEXT | --key KEY | --section SECTION
+                                 Activate one exact unique visible target
+  wait --screen CONTROLLER | --text TEXT | --key KEY | --section SECTION
+  wait --setting KEY --value JSON [--timeout MS]
+                                 Bounded read-only wait; text substring, timeout1..60000
   key up|down|left|right|enter|back|long
   input [TEXT]                   Read/write one editable non-sensitive field
   settings open [SECTION]        Open settings or one section
@@ -43,8 +50,8 @@ adbTimeoutMs (10000), wakeTimeoutMs (5000), appPackage, appActivity,
 androidWakeCode (KEYCODE_F8), browserWakeCode (119).
 Reload the plugin after changing the browser wake code.
 `;
-export function parse(argv: string[]): { command: string; args: string[]; rpc?: ReturnType<typeof validateRpc> } {
-  if (argv.includes('--help') || argv[0] === 'help' || argv.length === 0) return { command: 'help', args: [] };
+export function parse(argv: string[]): { command: string; args: string[]; rpc?: ReturnType<typeof validateRpc>; condition?: Params } {
+  if (argv[0] === '--help' || argv[0] === 'help' || argv.length === 0 || argv.length === 2 && argv[1] === '--help') return { command: 'help', args: [] };
   if (argv.length === 1 && argv[0] === '--version') return { command: 'version', args: [] };
   const [command, ...args] = argv;
   const usage = () => { throw new RemoteError('INVALID_ARGUMENTS', 'Invalid command or arguments.', 2, 'Run lampa --help.'); };
@@ -53,11 +60,15 @@ export function parse(argv: string[]): { command: string; args: string[]; rpc?: 
     if (args.length > (command === 'start' ? 1 : 0) || args.some(a => a.startsWith('-'))) usage();
     return { command, args };
   }
+  if (['ui', 'action', 'wait'].includes(command)) {
+    const params = parseAgent(command, args);
+    return command === 'wait' ? { command, args, condition: params } : { command, args, rpc: validateRpc({ method: command, params }) };
+  }
   let method = command;
   const params: Params = {};
-  if (['status', 'ui', 'player'].includes(command)) { if (args.length) usage(); }
+  if (['status', 'player'].includes(command)) { if (args.length) usage(); }
   else if (command === 'logs') { if (args.length > 1 || (args.length === 1 && args[0] !== '--follow')) usage(); }
-  else if (command === 'action' || command === 'key') { if (args.length !== 1) usage(); params[command === 'action' ? 'id' : 'key'] = args[0]; }
+  else if (command === 'key') { if (args.length !== 1) usage(); params.key = args[0]; }
   else if (command === 'input') { if (args.length > 1) usage(); if (args.length) params.text = args[0]; }
   else if (command === 'settings') {
     method = `settings.${args[0]}`;
@@ -69,7 +80,7 @@ export function parse(argv: string[]): { command: string; args: string[]; rpc?: 
 }
 const output = (value: Envelope) => process.stdout.write(JSON.stringify(value) + '\n');
 export async function main(argv = process.argv.slice(2)): Promise<void> {
-  const { command, args, rpc } = parse(argv);
+  const { command, args, rpc, condition } = parse(argv);
   if (command === 'help') { process.stdout.write(help); return; }
   if (command === 'version') { process.stdout.write(version + '\n'); return; }
   const c = config(command !== 'doctor');
@@ -110,6 +121,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (command === 'start' && args[0]) await new Adb({ ...c, serial: args[0] }).reverse();
     if (command === 'start' || command === 'bridge') { output(success(await health(c))); return; }
     await ensurePeer(c, current);
+    if (command === 'wait') { output(success(await waitForState(c, condition!))); return; }
     if (command === 'logs' && args[0] === '--follow') {
       let since = 0;
       const abort = new AbortController();

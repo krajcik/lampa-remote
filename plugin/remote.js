@@ -39,28 +39,54 @@
         var points = [[(left + right) / 2, (top + bottom) / 2], [left + 1, top + 1], [right - 1, bottom - 1]];
         return points.some(function (pt) { var hit = document.elementFromPoint(pt[0], pt[1]); return hit && (hit === el || el.contains(hit)); });
     }
-    function ui() {
-        targets = {}; snapshot++;
-        var items = [], total = 0;
+    function identity(el, name) {
+        var row = el.closest('[data-name]') || el;
+        var section = el.closest('[data-component]');
+        return { el: el, label: label(el), key: row.getAttribute('data-name'), section: section ? section.getAttribute('data-component') : null, controller: name };
+    }
+    function eligible(el) { return !el.disabled && el.getAttribute('aria-disabled') !== 'true' && visible(el); }
+    function candidates() {
         var name = controller();
         var root = name === 'settings' || name === 'settings_component' ? document.querySelector('.settings') : document;
-        Array.prototype.forEach.call((root || document).querySelectorAll('.selector'), function (el) {
-            if (!visible(el)) return;
-            total++;
-            if (items.length >= 150) return;
-            var row = el.closest('[data-name]') || el;
-            var key = row.getAttribute('data-name'), text = label(el);
-            var id = session + ':' + snapshot + ':' + items.length;
-            var r = el.getBoundingClientRect();
-            targets[id] = { el: el, label: text, controller: controller() };
-            var val = el.querySelector('.settings-param__value');
-            items.push({ id: id, text: sensitive.test(key || '') ? '[sensitive setting]' : text, key: key || null, section: el.getAttribute('data-component'), value: sensitive.test(key || '') ? '[redacted]' : val ? clean(val.innerText) : null, focused: el.classList.contains('focus'), bounds: [r.left, r.top, r.right, r.bottom].map(Math.round) });
-        });
-        return { state: status(), snapshot: session + ':' + snapshot, items: items, totalVisible: total, truncated: total > items.length, visibilityMethod: 'DOM styles + viewport + hit testing' };
+        return Array.prototype.filter.call((root || document).querySelectorAll('.selector'), eligible).map(function (el) { return identity(el, name); });
     }
-    function activate(el) {
+    function matches(target, p, exact) {
+        var text = sensitive.test(target.key || '') ? '[sensitive setting]' : target.label;
+        return (p.text === undefined || (exact ? text === p.text : text.indexOf(p.text) >= 0)) &&
+            (p.key === undefined || target.key === p.key) && (p.section === undefined || target.section === p.section);
+    }
+    function sameTarget(target) {
+        if (!eligible(target.el) || controller() !== target.controller) return false;
+        var current = identity(target.el, controller());
+        return current.label === target.label && current.key === target.key && current.section === target.section;
+    }
+    function ui(p) {
+        p = p || {};
+        var filters = ['text', 'key', 'section'].filter(function (key) { return p[key] !== undefined; });
+        if (filters.length > 1 || filters.some(function (key) { return typeof p[key] !== 'string' || !p[key].length; }) ||
+            (p.full !== undefined && typeof p.full !== 'boolean') || (p.limit !== undefined && (!Number.isInteger(p.limit) || p.limit < 1 || p.limit > 150))) error('INVALID_UI_PARAMS');
+        targets = {}; snapshot++;
+        var all = candidates(), selected = all.filter(function (target) { return matches(target, p, false); });
+        var limit = p.limit === undefined ? (p.full ? 150 : 50) : p.limit;
+        var items = selected.slice(0, limit).map(function (target, index) {
+            var el = target.el, id = session + ':' + snapshot + ':' + index;
+            targets[id] = target;
+            var val = el.querySelector('.settings-param__value');
+            var item = { id: id, text: sensitive.test(target.key || '') ? '[sensitive setting]' : target.label, key: target.key, section: target.section,
+                value: sensitive.test(target.key || '') ? '[redacted]' : val ? clean(val.innerText) : null, focused: el.classList.contains('focus') };
+            if (p.full) { var r = el.getBoundingClientRect(); item.bounds = [r.left, r.top, r.right, r.bottom].map(Math.round); }
+            return item;
+        });
+        var current = status();
+        var result = { state: p.full ? current : { controller: current.controller, component: current.component, title: current.title },
+            snapshot: session + ':' + snapshot, items: items, totalVisible: all.length, matchedVisible: selected.length, returned: items.length, limit: limit, truncated: selected.length > items.length };
+        if (p.full) result.visibilityMethod = 'DOM styles + viewport + hit testing';
+        return result;
+    }
+    function activate(el, target) {
         if (!visible(el)) error('TARGET_NOT_VISIBLE');
         Lampa.Controller.collectionFocus(el, el.parentElement, true);
+        if (target && !sameTarget(target)) error('STALE_TARGET: request ui again');
         Lampa.Utils.trigger(el, 'hover:enter');
     }
     function waitFor(predicate, timeout) {
@@ -112,7 +138,7 @@
     }
     async function execute(method, p) {
         if (method === 'status') return status();
-        if (method === 'ui') return ui();
+        if (method === 'ui') return ui(p);
         if (method === 'logs') return { entries: logs };
         if (method === 'player') return player();
         if (method === 'input') return input(p);
@@ -147,9 +173,20 @@
             record('settings', p.key + ': ' + before.value + ' -> ' + after.value);
             return { before: before, after: after, confirmed: after.value === p.value, state: ui() };
         } else if (method === 'action') {
-            var target = targets[p.id];
-            if (!target || controller() !== target.controller || label(target.el) !== target.label || !visible(target.el)) error('STALE_TARGET: request ui again');
-            targets = {}; activate(target.el);
+            var filters = ['text', 'key', 'section'].filter(function (key) { return p[key] !== undefined; });
+            var target;
+            if (p.id !== undefined) {
+                if (typeof p.id !== 'string' || filters.length) error('INVALID_SELECTOR');
+                target = Object.prototype.hasOwnProperty.call(targets, p.id) ? targets[p.id] : null;
+                if (!target || !sameTarget(target)) error('STALE_TARGET: request ui again');
+            } else {
+                if (filters.length !== 1 || typeof p[filters[0]] !== 'string' || !p[filters[0]].length) error('INVALID_SELECTOR');
+                var found = candidates().filter(function (item) { return matches(item, p, true); });
+                if (!found.length) error('TARGET_NOT_FOUND');
+                if (found.length !== 1) error('AMBIGUOUS_TARGET');
+                target = found[0];
+            }
+            targets = {}; activate(target.el, target);
         } else if (method === 'key') {
             if (['up', 'down', 'left', 'right'].includes(p.key)) Lampa.Controller.move(p.key);
             else if (['enter', 'back', 'long'].includes(p.key)) Lampa.Controller[p.key]();
