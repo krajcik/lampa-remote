@@ -65,7 +65,8 @@ test('install-url writes a private file; stdout/stderr never contain its credent
   assert.equal(statSync(output.data.file).mode & 0o777, 0o600);
   assert.equal(statSync(join(directory, 'config.json')).mode & 0o777, 0o600);
   const url = new URL(readFileSync(output.data.file, 'utf8').trim());
-  assert.equal(url.origin + url.pathname, 'https://raw.githubusercontent.com/krajcik/lampa-remote/main/plugin/loader.js');
+  assert.ok(url.href.length <= 300, 'Lampa rejects plugin URLs longer than 300 characters');
+  assert.equal(url.origin + url.pathname, 'https://krajcik.github.io/lampa-remote/plugin/loader.js');
   assert.doesNotMatch(url.origin + url.pathname + url.search, new RegExp(config.token));
   assert.deepEqual(JSON.parse(decodeURIComponent(url.hash.slice('#lampa-remote='.length))), {
     url: `http://127.0.0.1:${config.port}/plugin.js?token=${config.token}`,

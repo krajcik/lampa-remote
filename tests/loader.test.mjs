@@ -6,7 +6,7 @@ import test from 'node:test';
 const source = readFileSync(new URL('../plugin/loader.js', import.meta.url), 'utf8');
 const token = 'ab'.repeat(32);
 const config = { url: `http://127.0.0.1:18657/plugin.js?token=${token}`, browserWakeCode: 119, wakeTimeoutMs: 20000 };
-const install = value => 'https://raw.githubusercontent.com/krajcik/lampa-remote/main/plugin/loader.js#lampa-remote=' + encodeURIComponent(JSON.stringify(value));
+const install = value => 'https://krajcik.github.io/lampa-remote/plugin/loader.js#lampa-remote=' + encodeURIComponent(JSON.stringify(value));
 
 function fixture({ current = install(config), stored = [], pairing = config } = {}) {
   const listeners = new Map(), timers = new Map(), requests = [], warnings = [];
