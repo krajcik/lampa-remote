@@ -1,0 +1,70 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { pluginFixture } from './plugin-fixture.mjs';
+
+test('clock skew does not expire a newly received command; stale queued actions never execute', async t => {
+  const f = pluginFixture({ clockSkew: 60000 }); t.after(f.stop);
+  const status = await f.response(f.send('status'));
+  assert.equal(status.error, undefined);
+  assert.equal(status.result.appVersion, '3.3.8');
+  const first = f.send('key', { key: 'up' }, 1000);
+  const stale = f.send('key', { key: 'down' }, 10);
+  f.advance(100);
+  assert.equal((await f.response(first)).error, undefined);
+  assert.equal((await f.response(stale)).error.code, 'COMMAND_EXPIRED');
+  assert.deepEqual(f.moved, ['up']);
+});
+
+test('credential fields are refused or redacted even when their values are short', async t => {
+  const f = pluginFixture({ fieldName: 'jackett_key' }); t.after(f.stop);
+  const settings = await f.response(f.send('settings.get'));
+  const ui = await f.response(f.send('ui'));
+  const field = await f.response(f.send('settings.get', { key: 'jackett_key' }));
+  const input = await f.response(f.send('input'));
+  assert.equal(field.error.code, 'SETTING_NOT_AVAILABLE');
+  assert.equal(input.error.code, 'SENSITIVE_INPUT_REFUSED');
+  assert.equal(ui.result.items[0].value, '[redacted]');
+  assert.doesNotMatch(JSON.stringify([settings, ui, field, input]), /DUMMY1234/);
+  assert.equal(settings.result.settings.length, 1);
+});
+
+test('input distinguishes DOM writes, application mismatch, confirmation and unavailable mirrors', async t => {
+  for (const [options, expected] of [[{ mirror: 'old' }, false], [{ mirror: 'old', reflectInput: true }, true], [{ mirror: null }, null]]) {
+    const f = pluginFixture(options); t.after(f.stop);
+    const reply = await f.response(f.send('input', { text: 'Привет 🌊' }));
+    assert.equal(reply.error, undefined);
+    assert.equal(reply.result.domWritten, true);
+    assert.equal(reply.result.appConfirmed, expected);
+    assert.equal(reply.result.confirmed, undefined);
+    assert.equal(reply.result.submitted, false);
+  }
+});
+
+test('invalid WS requests are ignored and a subsequent valid command still works', async t => {
+  const f = pluginFixture(); t.after(f.stop);
+  for (const value of [null, [], {}, { id: 'x', method: 'eval', params: {}, ttlMs: 1000 }]) f.socket.onmessage({ data: JSON.stringify(value) });
+  assert.equal((await f.response(f.send('player'))).result.webVideo, false);
+});
+
+test('UI/action/settings/logs retain their basic behavior and stale IDs cannot activate a new target', async t => {
+  const f = pluginFixture(); t.after(f.stop);
+  const initial = await f.response(f.send('ui'));
+  const firstId = initial.result.items.find(item => item.key === 'background').id;
+  await f.response(f.send('ui'));
+  assert.equal((await f.response(f.send('action', { id: firstId }))).error.code, 'STALE_TARGET');
+  assert.equal(f.actions(), 0);
+  const current = await f.response(f.send('ui'));
+  const id = current.result.items.find(item => item.key === 'background').id;
+  assert.equal((await f.response(f.send('action', { id }))).result.dispatched, true);
+  assert.equal((await f.response(f.send('settings.get', { key: 'background' }))).result.value, true);
+  const setting = await f.response(f.send('settings.set', { key: 'background', value: false }));
+  assert.equal(setting.result.before.value, true);
+  assert.equal(setting.result.after.value, false);
+  assert.equal(setting.result.confirmed, true);
+  assert.equal((await f.response(f.send('settings.open', { section: 'interface' }))).result.dispatched, true);
+  f.warn('jackett_key DUMMY1234');
+  f.warn('Network unavailable');
+  const logs = await f.response(f.send('logs'));
+  assert.doesNotMatch(JSON.stringify(logs), /DUMMY1234/);
+  assert.match(JSON.stringify(logs), /Network unavailable/);
+});

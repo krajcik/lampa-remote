@@ -1,0 +1,25 @@
+{
+  "name": "lampa-remote",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "lampa": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@types/ws": "8.18.2",
+    "typescript": "7.0.2"
+  }
+}
