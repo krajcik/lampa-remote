@@ -46,7 +46,7 @@ Exit codes: 0 success, 1 unexpected, 2 usage, 3 precondition, 4 transport/unknow
 LAMPA_REMOTE_STATE overrides the private .local/ state directory.
 Edit config.json there (0600); restart bridge to apply changed runtime values.
 Fields: port, serial, idleTimeoutMs (3600000), rpcTimeoutMs (5000),
-adbTimeoutMs (10000), wakeTimeoutMs (5000), appPackage, appActivity,
+adbTimeoutMs (10000), wakeTimeoutMs (20000), wakeRetryIntervalMs (1000), appPackage, appActivity,
 androidWakeCode (KEYCODE_F8), browserWakeCode (119).
 Reload the plugin after changing the browser wake code.
 `;

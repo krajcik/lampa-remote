@@ -59,6 +59,7 @@ test('public UI is compact by default, full is opt-in, filters/counts apply befo
   rows[0].text = rows[69].text = 'Duplicate';
   const f = await fixture(t, { rows });
   const compact = await f.cli(['ui']); assert.equal(compact.status, 0, compact.stderr);
+  assert.equal(compact.data.state.screensaverActive, null);
   assert.equal(compact.data.items.length, 50); assert.equal(compact.data.totalVisible, 70);
   assert.equal(compact.data.matchedVisible, 70); assert.equal(compact.data.returned, 50); assert.equal(compact.data.truncated, true);
   assert.equal(compact.data.items[0].bounds, undefined); assert.equal(compact.data.state.viewport, undefined);
@@ -141,6 +142,54 @@ test('a missing state response is transport4 rather than a false WAIT_TIMEOUT or
   const result = await f.cli(['wait', '--screen', 'done', '--timeout', '50']);
   assert.equal(result.status, 4, result.stderr); assert.equal(result.error.code, 'WAIT_READ_TIMEOUT'); assert.equal(result.error.outcome, undefined);
   assert.equal(f.calls.length, 1); assert.equal(f.model.actions(), 0);
+});
+
+test('wait preserves known unavailable-setting preconditions as exit3 without mutation outcome', async t => {
+  const f = await fixture(t);
+  for (const args of [['settings', 'get', '__lampa_remote_missing_test__'], ['wait', '--setting', '__lampa_remote_missing_test__', '--value', 'true', '--timeout', '500']]) {
+    const r = await f.cli(args);
+    assert.equal(r.status, 3, r.stderr); assert.equal(r.error.code, 'SETTING_NOT_AVAILABLE'); assert.equal(r.error.outcome, undefined);
+  }
+  assert.equal(f.model.actions(), 0); assert.deepEqual(f.adb.calls(), []);
+});
+
+test('screensaver reads and service wake are passive; other mutations refuse; explicit key awaits fade and consumes navigation', async t => {
+  const f = await fixture(t, { screensaver: { active: true } });
+  for (const args of [['status'], ['ui'], ['ui', '--full']]) {
+    const r = await f.cli(args); assert.equal(r.status, 0, r.stderr);
+    assert.equal((r.data.state || r.data).screensaverActive, true);
+    if (args[0] === 'ui') assert.equal(r.data.totalVisible, 0);
+  }
+  f.model.wake(); f.model.wake('keyup');
+  assert.equal(f.model.saver.resets, 0); assert.equal(f.model.saver.stops, 0);
+  for (const args of [['action', '--text', 'Background'], ['input', 'new text'], ['settings', 'open'], ['settings', 'set', 'background', 'true']]) {
+    const r = await f.cli(args); assert.equal(r.status, 3, r.stderr); assert.equal(r.error.code, 'SCREENSAVER_ACTIVE'); assert.ok(r.error.hint);
+  }
+  assert.equal(f.model.actions(), 0); assert.equal(f.model.field.value, 'old'); assert.deepEqual(f.model.moved, []);
+  assert.equal(f.model.saver.resets, 0);
+  let completed = false;
+  const pending = f.cli(['key', 'down']).then(r => { completed = true; return r; });
+  await until(() => f.model.saver.stops === 1);
+  assert.equal(f.model.saver.active, false); assert.equal(f.model.saver.overlayVisible, true);
+  await delay(350); assert.equal(completed, false); assert.deepEqual(f.model.moved, []);
+  f.model.finishFade();
+  const dismissed = await pending; assert.equal(dismissed.status, 0, dismissed.stderr); assert.equal(dismissed.data.dismissedScreensaver, true);
+  assert.equal(dismissed.data.state.state.screensaverActive, false); assert.deepEqual(f.model.moved, []);
+  const normal = await f.cli(['key', 'down']); assert.equal(normal.status, 0, normal.stderr); assert.deepEqual(f.model.moved, ['down']);
+  assert.deepEqual(f.adb.calls(), []);
+});
+
+test('normal dispatched mutations reset the native screensaver timer; reads and no-op setting do not', async t => {
+  const f = await fixture(t, { screensaver: { active: false }, replaceRows: false });
+  for (const args of [['status'], ['ui'], ['input'], ['settings', 'get', 'background'], ['settings', 'set', 'background', 'false']]) {
+    const r = await f.cli(args); assert.equal(r.status, 0, r.stderr);
+  }
+  assert.equal(f.model.saver.resets, 0);
+  for (const args of [['key', 'down'], ['action', '--key', 'background'], ['input', 'changed'], ['settings', 'open'], ['settings', 'set', 'background', 'false']]) {
+    const before = f.model.saver.resets;
+    const r = await f.cli(args); assert.equal(r.status, 0, r.stderr); assert.equal(f.model.saver.resets, before + 1);
+  }
+  assert.equal(f.model.saver.stops, 0);
 });
 
 test('invalid agent arguments fail before any configuration or runtime side effect', async t => {

@@ -45,7 +45,7 @@ export async function waitForState(c: Config, condition: Params): Promise<Params
     try { data = (await request(c, '/rpc', { method, params }, signal)).data; }
     catch (error) {
       if (signal.aborted) throw new RemoteError('WAIT_READ_TIMEOUT', 'The state read did not complete before the wait deadline.', 4, 'Check plugin responsiveness; no mutation was sent.');
-      if (error instanceof RemoteError) throw new RemoteError(error.code, error.message, 4, error.hint);
+      if (error instanceof RemoteError) throw new RemoteError(error.code, error.message, error.exitCode, error.hint);
       throw new RemoteError('WAIT_READ_FAILED', 'Could not read the current state.', 4);
     }
     polls++;

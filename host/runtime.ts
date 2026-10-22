@@ -37,8 +37,8 @@ export async function request(c: Config, path: string, body?: unknown, signal?: 
   return data as Envelope & { ok: true };
 }
 
-export async function health(c: Config): Promise<Params> {
-  const data = (await request(c, '/health?passive=1')).data;
+export async function health(c: Config, signal?: AbortSignal): Promise<Params> {
+  const data = (await request(c, '/health?passive=1', undefined, signal)).data;
   if (!isObject(data) || data.protocolVersion !== protocolVersion || data.version !== version || !Number.isInteger(data.pid) || Number(data.pid) <= 1) {
     throw new RemoteError('PROTOCOL_MISMATCH', 'The bridge version is incompatible.', 3, 'Stop the old bridge explicitly and start the installed version.');
   }
@@ -102,16 +102,22 @@ export async function lease(c: Config): Promise<() => Promise<void>> {
 
 export async function ensurePeer(c: Config, current: Params): Promise<void> {
   if (current.ready === true && isObject(current.hello)) return;
-  const adb = new Adb(c);
-  await adb.reverse();
-  await adb.wake();
   const deadline = performance.now() + c.wakeTimeoutMs;
-  while (performance.now() < deadline) {
-    const next = await health(c);
-    if (next.ready === true && isObject(next.hello)) return;
-    if (next.lastPeerError && (!current.lastPeerError || next.peerGeneration !== current.peerGeneration)) throw new RemoteError(String(next.lastPeerError), 'The plugin handshake was rejected.', 3, 'Reload the installed Lampa Remote plugin.');
-    await delay(25);
-  }
+  const adb = new Adb(c, deadline);
+  let nextWake = 0;
+  try {
+    await adb.reverse();
+    while (performance.now() < deadline) {
+      const next = await health(c, AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))));
+      if (next.ready === true && isObject(next.hello)) return;
+      if (next.lastPeerError && (!current.lastPeerError || next.peerGeneration !== current.peerGeneration)) throw new RemoteError(String(next.lastPeerError), 'The plugin handshake was rejected.', 3, 'Reload the installed Lampa Remote plugin.');
+      if (performance.now() >= nextWake) {
+        await adb.wake();
+        nextWake = performance.now() + c.wakeRetryIntervalMs;
+      }
+      await delay(Math.max(1, Math.min(25, deadline - performance.now())));
+    }
+  } catch (error) { if (performance.now() < deadline) throw error; }
   throw new RemoteError('PLUGIN_WAKE_TIMEOUT', 'No compatible plugin responded within wakeTimeoutMs.', 4, 'Check the installed plugin and calibrate the Android/browser wake codes.');
 }
 
@@ -141,7 +147,11 @@ export async function doctor(c: Config): Promise<{ checks: Params; error?: Remot
         const live = (await request(c, '/rpc', { method: 'status', params: {} })).data;
         if (!isObject(live) || live.protocolVersion !== protocolVersion || live.pluginVersion !== version || live.sourceHash !== h.sourceHash || live.appready !== true) {
           checks.protocol = failed(new RemoteError('PROTOCOL_MISMATCH', 'The live plugin status did not match its handshake.', 3, 'Reload the installed plugin.'));
-        } else if (live.visibility === 'hidden') checks.foreground = failed(new RemoteError('APP_HIDDEN', 'The plugin reports that Lampa is hidden.', 3, 'Return to Lampa explicitly.'));
+        } else {
+          checks.plugin = { ok: true, screensaverActive: typeof live.screensaverActive === 'boolean' ? live.screensaverActive : null,
+            ...(live.screensaverActive === true ? { hint: 'Send an explicit key to dismiss the Lampa screensaver before another mutation.' } : {}) };
+          if (live.visibility === 'hidden') checks.foreground = failed(new RemoteError('APP_HIDDEN', 'The plugin reports that Lampa is hidden.', 3, 'Return to Lampa explicitly.'));
+        }
       } catch (error) { checks.plugin = failed(error); }
     }
   } catch (error) { checks.bridge = failed(error); checks.plugin = { ok: false, code: 'BRIDGE_UNAVAILABLE' }; checks.protocol = { ok: false, code: 'BRIDGE_UNAVAILABLE' }; }

@@ -40,9 +40,9 @@ async function fixture(t, options = {}, fake = {}) {
   const getHealth = async () => (await (await fetch(url + '/health?passive=1', { headers: { Authorization: `Bearer ${token}` } })).json()).data;
   return { c, directory, adb, cli, start, save, url, getHealth };
 }
-async function peer(f, responder = true) {
+async function peer(f, responder = true, observed = {}) {
   const h = await f.getHealth();
-  const status = { protocolVersion: 1, pluginVersion: h.version, sourceHash: h.sourceHash, browserWakeCode: f.c.browserWakeCode, appready: true, visibility: 'visible' };
+  const status = { protocolVersion: 1, pluginVersion: h.version, sourceHash: h.sourceHash, browserWakeCode: f.c.browserWakeCode, appready: true, visibility: 'visible', ...observed };
   const ws = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv?token=${token}`); await once(ws, 'open');
   ws.send(JSON.stringify({ type: 'hello', data: status }));
   let calls = 0;
@@ -53,6 +53,7 @@ async function peer(f, responder = true) {
 
 test('runtime defaults are explicit; old token+port config remains compatible', async t => {
   assert.equal(defaults.idleTimeoutMs, 3600000);
+  assert.equal(defaults.wakeTimeoutMs, 20000); assert.equal(defaults.wakeRetryIntervalMs, 1000);
   assert.equal(defaults.appActivity, '.ui.MainActivity');
   const f = await fixture(t); f.save({ token, port: f.c.port });
   const result = await f.cli(['bridge']); assert.equal(result.status, 0, result.stderr);
@@ -82,7 +83,7 @@ test('atomic first config publication and invalid edits never leak or regenerate
   assert.equal(created.idleTimeoutMs, 3600000);
   assert.match(readFileSync(join(f.directory, 'install-url.txt'), 'utf8'), new RegExp(created.token));
   for (const r of results) assert.ok(!r.stdout.includes(created.token));
-  for (const extra of [{ constructor: 'bad' }, { toString: 'bad' }, { idleTimeoutMs: 0 }, { rpcTimeoutMs: '5000' }, { appPackage: 'bad;cmd' }, { browserWakeCode: -1 }]) {
+  for (const extra of [{ constructor: 'bad' }, { toString: 'bad' }, { idleTimeoutMs: 0 }, { rpcTimeoutMs: '5000' }, { wakeRetryIntervalMs: 0 }, { wakeRetryIntervalMs: '1000' }, { wakeRetryIntervalMs: 60001 }, { appPackage: 'bad;cmd' }, { browserWakeCode: -1 }]) {
     f.save({ ...f.c, ...extra }); const r = await f.cli(['app', 'start']);
     assert.equal(r.status, 3, r.stderr); assert.equal(JSON.parse(r.stderr).error.code, 'CONFIG_INVALID');
   }
@@ -164,6 +165,7 @@ test('cold ordinary RPC wakes once after guard and then warm RPC never invokes A
   });
   const first = f.cli(['status']); const p = await connected; const r = await first;
   assert.equal(r.status, 0, r.stderr);
+  assert.equal(p.calls(), 1);
   const before = f.adb.calls(); assert.equal(before.filter(args => args.includes('keyevent')).length, 1);
   const second = await f.cli(['status']); assert.equal(second.status, 0, second.stderr);
   assert.deepEqual(f.adb.calls(), before);
@@ -171,13 +173,69 @@ test('cold ordinary RPC wakes once after guard and then warm RPC never invokes A
   }
 });
 
+async function waitForWakes(f, count) {
+  for (let i = 0; i < 1000; i++) {
+    if (f.adb.calls().filter(args => args.includes('keyevent')).length >= count) return;
+    await delay(5);
+  }
+  assert.fail('Expected service wake was not sent');
+}
+
+test('a late hook receives a later guarded service pulse, while the actual RPC dispatches once', async t => {
+  const f = await fixture(t, { wakeTimeoutMs: 3000, wakeRetryIntervalMs: 80 });
+  const bridge = createBridge(f.c); await bridge.listen(); t.after(() => bridge.close());
+  const result = f.cli(['key', 'down']);
+  await waitForWakes(f, 2);
+  const p = await peer(f);
+  const r = await result; assert.equal(r.status, 0, r.stderr); assert.equal(p.calls(), 1);
+  const calls = f.adb.calls(); assert.equal(calls.filter(args => args.includes('keyevent')).length, 2);
+  assert.equal(calls.filter(args => args.includes('dumpsys')).length, 2);
+  assert.ok(!calls.some(args => args.includes('am')));
+  const warm = await f.cli(['status']); assert.equal(warm.status, 0, warm.stderr); assert.deepEqual(f.adb.calls(), calls);
+});
+
+test('wake retries stop on foreground switch, fresh protocol rejection or the total deadline', async t => {
+  for (const reason of ['foreground', 'protocol', 'deadline']) {
+    const f = await fixture(t, { wakeTimeoutMs: 1100, wakeRetryIntervalMs: 80 });
+    const bridge = createBridge(f.c); await bridge.listen(); t.after(() => bridge.close());
+    const started = performance.now();
+    const result = f.cli(['key', 'down']);
+    await waitForWakes(f, 1);
+    if (reason === 'foreground') f.adb.update({ foreground: 'com.google.android.tvlauncher' });
+    if (reason === 'protocol') {
+      const ws = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv?token=${token}`); await once(ws, 'open');
+      const closed = once(ws, 'close'); ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 999 } })); await closed;
+    }
+    const r = await result;
+    assert.equal(r.status, reason === 'deadline' ? 4 : 3, r.stderr);
+    const error = JSON.parse(r.stderr).error;
+    assert.equal(error.code, { foreground: 'APP_NOT_FOREGROUND', protocol: 'PROTOCOL_MISMATCH', deadline: 'PLUGIN_WAKE_TIMEOUT' }[reason]);
+    assert.equal(error.outcome, undefined);
+    const count = f.adb.calls().filter(args => args.includes('keyevent')).length;
+    if (reason === 'deadline') { assert.ok(count >= 2); assert.ok(performance.now() - started < 2000); }
+    else assert.equal(count, 1);
+    await delay(130); assert.equal(f.adb.calls().filter(args => args.includes('keyevent')).length, count);
+    assert.ok(!f.adb.calls().some(args => args.includes('am')));
+  }
+});
+
+test('the wake budget also bounds an unresponsive ADB subprocess before any RPC', async t => {
+  const f = await fixture(t, { wakeTimeoutMs: 150, adbTimeoutMs: 10000 }, { delayMs: 2000 });
+  const bridge = createBridge(f.c); await bridge.listen(); t.after(() => bridge.close());
+  const started = performance.now(); const r = await f.cli(['status']);
+  assert.equal(r.status, 4, r.stderr); assert.equal(JSON.parse(r.stderr).error.code, 'PLUGIN_WAKE_TIMEOUT');
+  assert.ok(performance.now() - started < 1000);
+  assert.ok(!f.adb.calls().some(args => args.includes('input') || args.includes('am')));
+});
+
 test('doctor is passive and requires a fresh compatible status, not a stale live socket', async t => {
   for (const responsive of [false, true]) {
     const f = await fixture(t, { rpcTimeoutMs: 100 });
     const bridge = createBridge({ ...f.c, timeout: f.c.rpcTimeoutMs }); await bridge.listen(); t.after(() => bridge.close());
-    const p = await peer(f, responsive);
+    const p = await peer(f, responsive, { screensaverActive: true });
     const r = await f.cli(['doctor']);
-    if (responsive) { assert.equal(r.status, 0, r.stderr); assert.equal(JSON.parse(r.stdout).data.ready, true); }
+    if (responsive) { assert.equal(r.status, 0, r.stderr); const data = JSON.parse(r.stdout).data;
+      assert.equal(data.ready, true); assert.equal(data.checks.plugin.screensaverActive, true); assert.ok(data.checks.plugin.hint); }
     else { assert.equal(r.status, 4, r.stderr); assert.equal(JSON.parse(r.stderr).meta.checks.plugin.code, 'TV_TIMEOUT'); assert.ok(JSON.parse(r.stderr).error.hint); }
     assert.equal(p.calls(), 1);
     assert.ok(!f.adb.calls().some(args => args.includes('input') || args.includes('reverse') || args.includes('am')));

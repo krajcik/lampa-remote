@@ -5,9 +5,11 @@ import { RemoteError } from './protocol.js';
 
 export class Adb {
   private selected?: string;
-  constructor(private c: Config) {}
+  constructor(private c: Config, private deadline = Infinity) {}
   async run(args: string[], mutation = false): Promise<string> {
-    try { return (await promisify(execFile)('adb', args, { timeout: this.c.adbTimeoutMs, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024, windowsHide: true })).stdout; }
+    const remaining = this.deadline - performance.now();
+    if (remaining <= 0) throw new RemoteError('PLUGIN_WAKE_TIMEOUT', 'The wake budget expired before an ADB command.', 4);
+    try { return (await promisify(execFile)('adb', args, { timeout: Math.max(1, Math.ceil(Math.min(this.c.adbTimeoutMs, remaining))), killSignal: 'SIGKILL', maxBuffer: 1024 * 1024, windowsHide: true })).stdout; }
     catch (error) {
       const e = error as NodeJS.ErrnoException & { killed?: boolean };
       const code = e.code === 'ENOENT' ? 'ADB_NOT_FOUND' : e.killed || e.code === 'ETIMEDOUT' ? 'ADB_TIMEOUT' : 'ADB_COMMAND_FAILED';

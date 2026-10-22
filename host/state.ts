@@ -6,7 +6,7 @@ import { isObject, RemoteError } from './protocol.js';
 
 export const stateDir = resolve(process.env.LAMPA_REMOTE_STATE || fileURLToPath(new URL('../.local/', import.meta.url)));
 export const defaults = {
-  port: 18657, idleTimeoutMs: 3600000, rpcTimeoutMs: 5000, adbTimeoutMs: 10000, wakeTimeoutMs: 5000,
+  port: 18657, idleTimeoutMs: 3600000, rpcTimeoutMs: 5000, adbTimeoutMs: 10000, wakeTimeoutMs: 20000, wakeRetryIntervalMs: 1000,
   serial: null as string | null, appPackage: 'ru.twicker.lampa', appActivity: '.ui.MainActivity',
   androidWakeCode: 'KEYCODE_F8', browserWakeCode: 119,
 };
@@ -39,7 +39,7 @@ export function config(create = true): Config {
   const c = { ...defaults, ...value } as Config;
   const integer = (v: unknown, min: number, max: number) => Number.isInteger(v) && Number(v) >= min && Number(v) <= max;
   if (typeof c.token !== 'string' || !/^[a-f0-9]{64}$/i.test(c.token) || !integer(c.port, 1, 65535) ||
-      !integer(c.idleTimeoutMs, 1, 604800000) || !integer(c.rpcTimeoutMs, 1, 60000) || !integer(c.adbTimeoutMs, 1, 60000) || !integer(c.wakeTimeoutMs, 1, 60000) ||
+      !integer(c.idleTimeoutMs, 1, 604800000) || !integer(c.rpcTimeoutMs, 1, 60000) || !integer(c.adbTimeoutMs, 1, 60000) || !integer(c.wakeTimeoutMs, 1, 60000) || !integer(c.wakeRetryIntervalMs, 1, 60000) ||
       (c.serial !== null && (typeof c.serial !== 'string' || !/^[\w.:[\]-]{1,200}$/.test(c.serial))) ||
       typeof c.appPackage !== 'string' || !/^[a-zA-Z]\w*(?:\.\w+)+$/.test(c.appPackage) ||
       typeof c.appActivity !== 'string' || !/^\.?[a-zA-Z_]\w*(?:\.\w+)*$/.test(c.appActivity) ||

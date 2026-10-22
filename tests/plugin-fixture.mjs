@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew = 0, reflectInput = false, autoWake = true, hiddenMirror = false, unrelatedMirror = false, extraMirror = false, rows = [], replaceRows = false, remoteConfig = {}, onAction, onFocus } = {}) {
+export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew = 0, reflectInput = false, autoWake = true, hiddenMirror = false, unrelatedMirror = false, extraMirror = false, rows = [], replaceRows = false, remoteConfig = {}, onAction, onFocus, screensaver = null } = {}) {
   let monotonic = 0;
   const sent = [], moved = [], listeners = new Map(), timers = new Set();
   let connections = 0;
@@ -38,14 +38,16 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
     return el;
   });
   const selectors = replaceRows ? scenarioRows : [secretRow, backgroundRow, ...scenarioRows];
-  const nodes = [field, appMirror, extraMirror ? otherMirror : null, secretRow, backgroundRow, settingsButton, ...scenarioRows].filter(Boolean);
+  const saver = screensaver && { active: !!screensaver.active, overlayVisible: !!screensaver.active, resets: 0, stops: 0 };
+  const overlay = element('Screensaver'); Object.defineProperty(overlay, 'hidden', { get: () => !saver?.overlayVisible });
+  const nodes = [field, appMirror, extraMirror ? otherMirror : null, secretRow, backgroundRow, settingsButton, overlay, ...scenarioRows].filter(Boolean);
   const document = {
     hidden: false, visibilityState: 'visible', activeElement: field,
     body: { classList: { contains: () => true } },
     documentElement: { contains: el => nodes.includes(el) && !el.detached },
     querySelector: selector => selector === '.open--settings' ? settingsButton : selector === '.settings [data-component="interface"]' ? backgroundRow : null,
-    querySelectorAll: selector => selector === 'input,textarea' ? [field] : selector === '.selector' ? selectors : selector === '.settings [data-name]' ? selectors.filter(el => el.attrs['data-name']) : selector === '.search__input,.settings-input__input' ? appMirror ? [appMirror] : [] : [],
-    elementFromPoint: (x, y) => nodes.find(el => { const r = el.getBoundingClientRect(); return !el.hidden && !el.detached && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }),
+    querySelectorAll: selector => selector === '.screensaver-layer' ? saver ? [overlay] : [] : selector === 'input,textarea' ? [field] : selector === '.selector' ? selectors : selector === '.settings [data-name]' ? selectors.filter(el => el.attrs['data-name']) : selector === '.search__input,.settings-input__input' ? appMirror ? [appMirror] : [] : [],
+    elementFromPoint: (x, y) => saver?.overlayVisible ? overlay : nodes.find(el => { const r = el.getBoundingClientRect(); return !el.hidden && !el.detached && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }),
   };
   class Socket {
     static current;
@@ -62,6 +64,7 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
     Event: class { constructor(type) { this.type = type; } },
     Lampa: {
       Manifest: { app_version: '3.3.8' }, Activity: { active: () => ({}) },
+      Screensaver: saver ? { isWorked: () => saver.active, resetTimer: () => { saver.resets++; }, stop: () => { saver.stops++; saver.active = false; } } : undefined,
       Controller: { enabled: () => ({ name: controllerName }), move: key => moved.push(key), collectionFocus: el => onFocus?.(el) },
       Params: { defaults: { jackett_key: '', background: true } },
       Storage: { field: key => key === 'jackett_key' ? 'DUMMY1234' : background },
@@ -86,12 +89,13 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
     return id;
   }
   async function response(id) {
-    for (let i = 0; i < 50; i++) {
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline) {
       const result = sent.find(m => m.id === id);
       if (result) return result;
-      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setTimeout(resolve, 1));
     }
     assert.fail('Plugin did not respond to ' + id);
   }
-  return { send, response, sent, moved, field, appMirror, rows: scenarioRows, setController: name => { controllerName = name; }, setSection: name => settingsListener?.({ name }), setBackground: value => { background = value; }, advance: ms => { monotonic += ms; }, stop: () => window.__lampaRemote.stop(), socket: Socket.current, actions: () => actions, warn: message => sandbox.console.warn(message), wake, open, connections: () => connections, timers: () => timers.size, listeners, getSocket: () => Socket.current };
+  return { send, response, sent, moved, field, appMirror, saver, finishFade: () => { saver.overlayVisible = false; }, rows: scenarioRows, setController: name => { controllerName = name; }, setSection: name => settingsListener?.({ name }), setBackground: value => { background = value; }, advance: ms => { monotonic += ms; }, stop: () => window.__lampaRemote.stop(), socket: Socket.current, actions: () => actions, warn: message => sandbox.console.warn(message), wake, open, connections: () => connections, timers: () => timers.size, listeners, getSocket: () => Socket.current };
 }

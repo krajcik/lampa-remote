@@ -19,9 +19,25 @@
         send({ type: 'event', data: entry });
     }
     function controller() { return Lampa.Controller.enabled().name; }
+    function screensaverActive() {
+        var saver = Lampa.Screensaver;
+        if (!saver || typeof saver.isWorked !== 'function') return null;
+        var worked;
+        try { worked = saver.isWorked(); } catch (e) { return null; }
+        if (typeof worked !== 'boolean') return null;
+        // isWorked becomes false before jQuery finishes fading out its input-blocking layer.
+        return worked || Array.prototype.some.call(document.querySelectorAll('.screensaver-layer'), function (el) {
+            var style = getComputedStyle(el);
+            return document.documentElement.contains(el) && style.display !== 'none' && style.visibility !== 'hidden';
+        });
+    }
+    function resetScreensaverTimer() {
+        if (Lampa.Screensaver && typeof Lampa.Screensaver.resetTimer === 'function') Lampa.Screensaver.resetTimer();
+    }
+    function uncovered() { if (screensaverActive() === true) error('SCREENSAVER_ACTIVE'); }
     function status() {
         var a = Lampa.Activity.active() || {};
-        return { pluginVersion: config.version, protocolVersion: config.protocolVersion, browserWakeCode: config.browserWakeCode, sourceHash: config.sourceHash, appVersion: Lampa.Manifest.app_version, appready: !!window.appready, origin: location.origin, component: a.component || null, title: clean(a.title), controller: controller(), settingsSection: settingsSection, visibility: document.visibilityState, viewport: { width: innerWidth, height: innerHeight }, at: Date.now() };
+        return { pluginVersion: config.version, protocolVersion: config.protocolVersion, browserWakeCode: config.browserWakeCode, sourceHash: config.sourceHash, appVersion: Lampa.Manifest.app_version, appready: !!window.appready, origin: location.origin, component: a.component || null, title: clean(a.title), controller: controller(), settingsSection: settingsSection, screensaverActive: screensaverActive(), visibility: document.visibilityState, viewport: { width: innerWidth, height: innerHeight }, at: Date.now() };
     }
     function label(el) {
         var child = el.querySelector('.settings-param__name,.settings-folder__name,.menu__text,.card__title,.selectbox-item__title');
@@ -78,15 +94,17 @@
             return item;
         });
         var current = status();
-        var result = { state: p.full ? current : { controller: current.controller, component: current.component, title: current.title },
+        var result = { state: p.full ? current : { controller: current.controller, component: current.component, title: current.title, screensaverActive: current.screensaverActive },
             snapshot: session + ':' + snapshot, items: items, totalVisible: all.length, matchedVisible: selected.length, returned: items.length, limit: limit, truncated: selected.length > items.length };
         if (p.full) result.visibilityMethod = 'DOM styles + viewport + hit testing';
         return result;
     }
     function activate(el, target) {
+        uncovered();
         if (!visible(el)) error('TARGET_NOT_VISIBLE');
         Lampa.Controller.collectionFocus(el, el.parentElement, true);
         if (target && !sameTarget(target)) error('STALE_TARGET: request ui again');
+        resetScreensaverTimer();
         Lampa.Utils.trigger(el, 'hover:enter');
     }
     function waitFor(predicate, timeout) {
@@ -126,6 +144,7 @@
         if (p.text !== undefined) {
             if (document.hidden || field.disabled || field.readOnly) error('INPUT_NOT_EDITABLE');
             if (typeof p.text !== 'string' || p.text.length > 4096 || (field.maxLength >= 0 && p.text.length > field.maxLength)) error('INVALID_INPUT_TEXT');
+            uncovered(); resetScreensaverTimer();
             field.value = p.text;
             field.dispatchEvent(new Event('input', { bubbles: true }));
             field.dispatchEvent(new Event('change', { bubbles: true }));
@@ -141,15 +160,24 @@
         if (method === 'ui') return ui(p);
         if (method === 'logs') return { entries: logs };
         if (method === 'player') return player();
-        if (method === 'input') return input(p);
+        if (method === 'input') { if (p.text !== undefined) uncovered(); return input(p); }
         if (method === 'settings.get') {
             if (p.key) return setting(p.key);
             return { settings: Object.keys(Lampa.Params.defaults).filter(function (key) { return !sensitive.test(key); }).map(function (key) { try { return setting(key); } catch (e) { return { key: key, unavailable: true }; } }) };
         }
         if (document.hidden) error('APP_HIDDEN');
+        if (method === 'key' && !['up', 'down', 'left', 'right', 'enter', 'back', 'long'].includes(p.key)) error('INVALID_KEY');
+        if (screensaverActive() === true) {
+            if (method !== 'key' || typeof Lampa.Screensaver.stop !== 'function') error('SCREENSAVER_ACTIVE');
+            resetScreensaverTimer();
+            Lampa.Screensaver.stop();
+            await waitFor(function () { return screensaverActive() === false; });
+            return { dispatched: true, dismissedScreensaver: true, state: ui() };
+        }
         if (method === 'settings.open') {
             var button = document.querySelector('.open--settings');
             if (!button) error('SETTINGS_BUTTON_NOT_FOUND');
+            resetScreensaverTimer();
             Lampa.Utils.trigger(button, 'hover:enter');
             await waitFor(function () { return document.body.classList.contains('settings--open'); });
             if (p.section) {
@@ -188,6 +216,7 @@
             }
             targets = {}; activate(target.el, target);
         } else if (method === 'key') {
+            resetScreensaverTimer();
             if (['up', 'down', 'left', 'right'].includes(p.key)) Lampa.Controller.move(p.key);
             else if (['enter', 'back', 'long'].includes(p.key)) Lampa.Controller[p.key]();
             else error('INVALID_KEY');

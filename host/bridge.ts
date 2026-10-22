@@ -130,7 +130,8 @@ export function createBridge({ token, port = defaults.port, timeout = defaults.r
         const meta = { roundTripMs: Math.round((performance.now() - request.started) * 10) / 10, ...(typeof message.executionMs === 'number' && Number.isFinite(message.executionMs) ? { executionMs: message.executionMs } : {}) };
         if (isObject(message.error)) {
           const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(String(message.error.code)) ? String(message.error.code) : 'PLUGIN_ERROR';
-          reply(request.res, 422, { ...failure(new RemoteError(code, 'Lampa could not complete the command.')), meta });
+          reply(request.res, 422, { ...failure(new RemoteError(code, 'Lampa could not complete the command.', 3,
+            code === 'SCREENSAVER_ACTIVE' ? 'Send an explicit key to dismiss the Lampa screensaver, then inspect current state.' : undefined)), meta });
         } else reply(request.res, 200, success(message.result, meta));
       }
     });
