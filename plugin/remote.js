@@ -43,6 +43,16 @@
         var child = el.querySelector('.settings-param__name,.settings-folder__name,.menu__text,.card__title,.selectbox-item__title');
         return clean((child && child.innerText) || el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.className).replace(/\s+/g, ' ').trim().slice(0, 160);
     }
+    function withPointerHitTesting(read) {
+        // HoverSwitcher disables pointers in keyboard mode; never dispatch mouse events or keep its sheet disabled.
+        var sheets = Array.prototype.filter.call(document.head ? document.head.querySelectorAll('style') : [], function (style) {
+            return style.textContent.trim() === '* { pointer-events: none !important; }' && style.sheet && !style.sheet.disabled;
+        }).map(function (style) { return style.sheet; });
+        try {
+            sheets.forEach(function (sheet) { sheet.disabled = true; });
+            return read();
+        } finally { sheets.forEach(function (sheet) { sheet.disabled = false; }); }
+    }
     function visible(el) {
         if (!document.documentElement.contains(el)) return false;
         for (var p = el; p && p.nodeType === 1; p = p.parentElement) {
@@ -53,7 +63,9 @@
         var left = Math.max(0, r.left), top = Math.max(0, r.top), right = Math.min(innerWidth, r.right), bottom = Math.min(innerHeight, r.bottom);
         if (right <= left || bottom <= top) return false;
         var points = [[(left + right) / 2, (top + bottom) / 2], [left + 1, top + 1], [right - 1, bottom - 1]];
-        return points.some(function (pt) { var hit = document.elementFromPoint(pt[0], pt[1]); return hit && (hit === el || el.contains(hit)); });
+        return withPointerHitTesting(function () {
+            return points.some(function (pt) { var hit = document.elementFromPoint(pt[0], pt[1]); return hit && (hit === el || el.contains(hit)); });
+        });
     }
     function identity(el, name) {
         var row = el.closest('[data-name]') || el;
@@ -64,7 +76,9 @@
     function candidates() {
         var name = controller();
         var root = name === 'settings' || name === 'settings_component' ? document.querySelector('.settings') : document;
-        return Array.prototype.filter.call((root || document).querySelectorAll('.selector'), eligible).map(function (el) { return identity(el, name); });
+        return withPointerHitTesting(function () {
+            return Array.prototype.filter.call((root || document).querySelectorAll('.selector'), eligible).map(function (el) { return identity(el, name); });
+        });
     }
     function matches(target, p, exact) {
         var text = sensitive.test(target.key || '') ? '[sensitive setting]' : target.label;

@@ -192,6 +192,40 @@ test('normal dispatched mutations reset the native screensaver timer; reads and 
   assert.equal(f.model.saver.stops, 0);
 });
 
+test('keyboard-mode UI and semantic actions suspend only the exact Switcher sheet and restore even on hit-test failure', async t => {
+  const rule = '* { pointer-events: none !important; }';
+  const sheet = (textContent, initial = false) => {
+    let disabled = initial; const changes = [];
+    return { textContent, changes, sheet: { get disabled() { return disabled; }, set disabled(value) { changes.push(value); disabled = value; } } };
+  };
+  for (const keyboard of [false, true]) {
+    const own = sheet(rule), alreadyDisabled = sheet(rule, true), foreign = sheet('.card { color: red; }');
+    const hitTesting = { styles: keyboard ? [own, alreadyDisabled, foreign] : [] };
+    const f = await fixture(t, { hitTesting, rows: [{ text: 'Choose', attrs: { 'data-name': 'ready' } }, { text: 'Hidden' }] });
+    f.model.rows[1].hidden = true;
+    const ui = await f.cli(['ui']); assert.equal(ui.status, 0, ui.stderr); assert.equal(ui.data.totalVisible, 1);
+    assert.deepEqual(own.changes, keyboard ? [true, false] : []);
+    const action = await f.cli(['action', '--key', 'ready']); assert.equal(action.status, 0, action.stderr); assert.equal(f.model.actions(), 1);
+    assert.equal(own.sheet.disabled, false); assert.equal(alreadyDisabled.sheet.disabled, true); assert.equal(foreign.sheet.disabled, false);
+    assert.deepEqual(alreadyDisabled.changes, []); assert.deepEqual(foreign.changes, []);
+    hitTesting.occluded = true;
+    const covered = await f.cli(['ui']); assert.equal(covered.data.totalVisible, 0);
+    const refused = await f.cli(['action', '--key', 'ready']); assert.equal(refused.status, 3); assert.equal(refused.error.code, 'TARGET_NOT_FOUND');
+    assert.equal(f.model.actions(), 1); assert.equal(own.sheet.disabled, false);
+    hitTesting.occluded = false; hitTesting.throw = true;
+    const failed = await f.cli(['ui']); assert.equal(failed.error.code, 'PLUGIN_ERROR');
+    assert.equal(own.sheet.disabled, false); assert.equal(alreadyDisabled.sheet.disabled, true);
+    hitTesting.throw = false;
+    assert.equal((await f.cli(['ui'])).data.totalVisible, 1);
+    if (keyboard) {
+      const unknown = sheet(rule + ' .card { color: red; }'); hitTesting.styles.push(unknown);
+      assert.equal((await f.cli(['ui'])).data.totalVisible, 0);
+      assert.deepEqual(unknown.changes, []); assert.equal(unknown.sheet.disabled, false); assert.equal(own.sheet.disabled, false);
+    }
+    assert.deepEqual(f.adb.calls(), []);
+  }
+});
+
 test('invalid agent arguments fail before any configuration or runtime side effect', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'lampa-agent-usage-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const adb = fakeAdb(t, { devices: '' });

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew = 0, reflectInput = false, autoWake = true, hiddenMirror = false, unrelatedMirror = false, extraMirror = false, rows = [], replaceRows = false, remoteConfig = {}, onAction, onFocus, screensaver = null } = {}) {
+export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew = 0, reflectInput = false, autoWake = true, hiddenMirror = false, unrelatedMirror = false, extraMirror = false, rows = [], replaceRows = false, remoteConfig = {}, onAction, onFocus, screensaver = null, hitTesting = {} } = {}) {
   let monotonic = 0;
   const sent = [], moved = [], listeners = new Map(), timers = new Set();
   let connections = 0;
@@ -43,11 +43,16 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
   const nodes = [field, appMirror, extraMirror ? otherMirror : null, secretRow, backgroundRow, settingsButton, overlay, ...scenarioRows].filter(Boolean);
   const document = {
     hidden: false, visibilityState: 'visible', activeElement: field,
+    head: { querySelectorAll: () => hitTesting.styles || [] },
     body: { classList: { contains: () => true } },
     documentElement: { contains: el => nodes.includes(el) && !el.detached },
     querySelector: selector => selector === '.open--settings' ? settingsButton : selector === '.settings [data-component="interface"]' ? backgroundRow : null,
     querySelectorAll: selector => selector === '.screensaver-layer' ? saver ? [overlay] : [] : selector === 'input,textarea' ? [field] : selector === '.selector' ? selectors : selector === '.settings [data-name]' ? selectors.filter(el => el.attrs['data-name']) : selector === '.search__input,.settings-input__input' ? appMirror ? [appMirror] : [] : [],
-    elementFromPoint: (x, y) => saver?.overlayVisible ? overlay : nodes.find(el => { const r = el.getBoundingClientRect(); return !el.hidden && !el.detached && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }),
+    elementFromPoint: (x, y) => {
+      if (hitTesting.throw) throw new Error('Synthetic hit-test failure');
+      if ((hitTesting.styles || []).some(style => !style.sheet.disabled && style.textContent.includes('pointer-events: none !important'))) return root;
+      return saver?.overlayVisible || hitTesting.occluded ? overlay : nodes.find(el => { const r = el.getBoundingClientRect(); return !el.hidden && !el.detached && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; });
+    },
   };
   class Socket {
     static current;
