@@ -64,7 +64,13 @@ test('install-url writes a private file; stdout/stderr never contain its credent
   assert.doesNotMatch(result.stdout + result.stderr, new RegExp(config.token));
   assert.equal(statSync(output.data.file).mode & 0o777, 0o600);
   assert.equal(statSync(join(directory, 'config.json')).mode & 0o777, 0o600);
-  assert.match(readFileSync(output.data.file, 'utf8'), new RegExp('token=' + config.token));
+  const url = new URL(readFileSync(output.data.file, 'utf8').trim());
+  assert.equal(url.origin + url.pathname, 'https://raw.githubusercontent.com/krajcik/lampa-remote/main/plugin/loader.js');
+  assert.doesNotMatch(url.origin + url.pathname + url.search, new RegExp(config.token));
+  assert.deepEqual(JSON.parse(decodeURIComponent(url.hash.slice('#lampa-remote='.length))), {
+    url: `http://127.0.0.1:${config.port}/plugin.js?token=${config.token}`,
+    browserWakeCode: config.browserWakeCode, wakeTimeoutMs: config.wakeTimeoutMs,
+  });
 });
 
 test('CLI emits JSON success on stdout, state errors on stderr, and redacts credentials', async t => {

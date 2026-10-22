@@ -112,7 +112,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
   if (command === 'install-url') {
     const file = join(stateDir, 'install-url.txt');
-    writeFileSync(file, `http://127.0.0.1:${c.port}/plugin.js?token=${c.token}\n`, { mode: 0o600 }); chmodSync(file, 0o600);
+    const pairing = { url: `http://127.0.0.1:${c.port}/plugin.js?token=${c.token}`, browserWakeCode: c.browserWakeCode, wakeTimeoutMs: c.wakeTimeoutMs };
+    const url = 'https://raw.githubusercontent.com/krajcik/lampa-remote/main/plugin/loader.js#lampa-remote=' + encodeURIComponent(JSON.stringify(pairing));
+    writeFileSync(file, `${url}\n`, { mode: 0o600 }); chmodSync(file, 0o600);
     output(success({ file })); return;
   }
   const current = await ensureBridge(c);
