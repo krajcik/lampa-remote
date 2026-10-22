@@ -68,3 +68,48 @@ test('UI/action/settings/logs retain their basic behavior and stale IDs cannot a
   assert.doesNotMatch(JSON.stringify(logs), /DUMMY1234/);
   assert.match(JSON.stringify(logs), /Network unavailable/);
 });
+
+test('passive wake consumes both key phases, attempts once, never polls, and stop removes owned listeners', async t => {
+  const f = pluginFixture({ autoWake: false }); t.after(() => { if (f.listeners.has('keydown')) f.stop(); });
+  assert.equal(f.connections(), 0);
+  assert.equal(f.timers(), 0);
+  assert.deepEqual(f.wake('keydown', false, 120), { prevented: false, stopped: false, capture: true });
+  assert.equal(f.connections(), 0);
+  assert.deepEqual(f.wake(), { prevented: true, stopped: true, capture: true });
+  assert.deepEqual(f.wake('keyup'), { prevented: true, stopped: true, capture: true });
+  f.wake('keydown', true);
+  assert.equal(f.connections(), 1);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(f.connections(), 1);
+  assert.equal(f.timers(), 0);
+  f.wake(); f.open();
+  assert.equal(f.connections(), 2);
+  f.getSocket().close();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(f.connections(), 2);
+  assert.equal(f.timers(), 0);
+  f.stop();
+  assert.equal(f.listeners.size, 0);
+  f.wake(); assert.equal(f.connections(), 2);
+  const closing = pluginFixture({ autoWake: false });
+  t.after(() => { if (closing.listeners.has('keydown')) closing.stop(); });
+  closing.wake(); closing.getSocket().readyState = 2; closing.wake();
+  assert.equal(closing.connections(), 1);
+  closing.stop();
+});
+
+test('hidden current input mirror confirms app state, while unrelated or ambiguous mirrors do not', async t => {
+  for (const [options, expected] of [
+    [{ hiddenMirror: true, reflectInput: true }, true],
+    [{ hiddenMirror: true }, false],
+    [{ hiddenMirror: true, reflectInput: true, unrelatedMirror: true }, null],
+    [{ hiddenMirror: true, reflectInput: true, extraMirror: true }, null],
+  ]) {
+    const f = pluginFixture(options); t.after(f.stop);
+    const response = await f.response(f.send('input', { text: 'Тест Lampa 123' }));
+    assert.equal(response.error, undefined);
+    const result = response.result;
+    assert.equal(result.domWritten, true);
+    assert.equal(result.appConfirmed, expected);
+  }
+});

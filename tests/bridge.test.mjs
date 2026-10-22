@@ -18,7 +18,8 @@ async function fixture(t, timeout = 1000) {
   const tv = async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/tv?token=${token}`);
     await once(ws, 'open');
-    ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 1, appVersion: '3.3.8' } }));
+    const h = (await (await fetch(url + '/health?passive=1', { headers: { Authorization: `Bearer ${token}` } })).json()).data;
+    ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 1, pluginVersion: h.version, sourceHash: h.sourceHash, browserWakeCode: 119, appready: true, appVersion: '3.3.8' } }));
     return ws;
   };
   return { url, call, tv, port };
@@ -105,4 +106,22 @@ test('disconnect and timeout expose unknown outcome without replaying mutations'
   assert.equal(timedOut.body.error.code, 'TV_TIMEOUT');
   assert.equal(timedOut.body.error.outcome, 'unknown');
   assert.equal(calls, 1);
+});
+
+test('deep WS hello/event/response cannot overflow redaction or poison the next health/RPC', async t => {
+  const f = await fixture(t);
+  const deep = '['.repeat(10000) + '0' + ']'.repeat(10000);
+  for (const type of ['hello', 'event', 'response']) {
+    const ws = await f.tv(); const closed = once(ws, 'close');
+    if (type === 'response') {
+      ws.once('message', data => { const r = JSON.parse(data); ws.send('{"id":' + JSON.stringify(r.id) + ',"result":' + deep + '}'); });
+      const r = await f.call(); assert.equal(r.body.error.outcome, 'unknown'); assert.equal(r.body.error.code, 'INVALID_PEER_MESSAGE');
+    } else ws.send('{"type":' + JSON.stringify(type) + ',"data":' + deep + '}');
+    await closed;
+    assert.equal((await fetch(f.url + '/health?passive=1', { headers: { Authorization: `Bearer ${token}` } })).status, 200);
+    const next = await f.tv();
+    next.once('message', data => { const r = JSON.parse(data); next.send(JSON.stringify({ id: r.id, result: { survived: type } })); });
+    assert.equal((await f.call()).body.data.survived, type);
+    const nextClosed = once(next, 'close'); next.close(); await nextClosed;
+  }
 });

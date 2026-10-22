@@ -2,9 +2,10 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew = 0, reflectInput = false } = {}) {
+export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew = 0, reflectInput = false, autoWake = true, hiddenMirror = false, unrelatedMirror = false, extraMirror = false } = {}) {
   let monotonic = 0;
-  const sent = [], moved = [], listeners = new Map();
+  const sent = [], moved = [], listeners = new Map(), timers = new Set();
+  let connections = 0;
   let background = false, actions = 0;
   const root = { nodeType: 0, parentElement: null };
   function element(text = '', attrs = {}, left = 0) {
@@ -13,21 +14,23 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
       parentElement: root, attrs, disabled: false, readOnly: false, maxLength: -1,
       getAttribute(name) { return this.attrs[name] ?? null; },
       contains(child) { return child === this || child.parentElement === this; },
-      closest(selector) { return selector === '[data-name]' ? this.attrs['data-name'] ? this : null : context; },
+      closest(selector) { return selector === '[data-name]' ? this.attrs['data-name'] ? this : null : unrelatedMirror && selector.includes(',') ? null : context; },
       getBoundingClientRect: () => ({ left, top: 0, right: left + 100, bottom: 40 }),
       querySelector: () => null,
       dispatchEvent(event) { if (reflectInput && event.type === 'input' && appMirror) appMirror.textContent = this.value; },
     };
   }
-  const context = { querySelector: () => null };
+  const context = { querySelector: () => null, querySelectorAll: () => [appMirror, extraMirror ? otherMirror : null].filter(Boolean) };
   const field = Object.assign(element('', {}, 0), { value: 'old', name: fieldName, id: '', type: 'text', autocomplete: '' });
   const appMirror = mirror === null ? null : element(mirror, {}, 200);
+  if (appMirror) appMirror.hidden = hiddenMirror;
+  const otherMirror = element('unrelated', {}, 300);
   const secretRow = element('Jackett key DUMMY1234', { 'data-name': 'jackett_key' }, 400);
   secretRow.querySelector = selector => selector === '.settings-param__value' ? { innerText: 'DUMMY1234' } : null;
   const backgroundRow = element('Background', { 'data-name': 'background', 'data-type': 'toggle', 'data-component': 'interface' }, 600);
   backgroundRow.querySelector = selector => selector === '.settings-param__value' ? { innerText: String(background) } : null;
   const settingsButton = element('Settings', {}, 800);
-  const nodes = [field, appMirror, secretRow, backgroundRow, settingsButton].filter(Boolean);
+  const nodes = [field, appMirror, extraMirror ? otherMirror : null, secretRow, backgroundRow, settingsButton].filter(Boolean);
   const document = {
     hidden: false, visibilityState: 'visible', activeElement: field,
     body: { classList: { contains: () => true } },
@@ -38,16 +41,16 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
   };
   class Socket {
     static current;
-    constructor() { Socket.current = this; this.readyState = 1; }
+    constructor() { connections++; Socket.current = this; this.readyState = 0; }
     send(value) { sent.push(JSON.parse(value)); }
     close() { this.readyState = 3; this.onclose?.(); }
   }
   class WallClock extends Date { static now() { return Date.now() + clockSkew; } }
-  const window = { appready: true, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) };
+  const window = { appready: true, addEventListener: (name, fn, capture) => listeners.set(name, { fn, capture }), removeEventListener: name => listeners.delete(name) };
   const sandbox = {
     window, document, console: { warn() {}, error() {} }, location: { origin: 'http://test' }, innerWidth: 1000, innerHeight: 1000,
-    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
-    setTimeout, clearTimeout, requestAnimationFrame: fn => queueMicrotask(fn), WebSocket: Socket, performance: { now: () => monotonic }, Date: WallClock,
+    getComputedStyle: el => ({ display: el.hidden ? 'none' : 'block', visibility: 'visible', opacity: '1' }),
+    setTimeout: (fn, ms) => { const handle = setTimeout(() => { timers.delete(handle); fn(); }, ms); timers.add(handle); return handle; }, clearTimeout: handle => { timers.delete(handle); clearTimeout(handle); }, requestAnimationFrame: fn => queueMicrotask(fn), WebSocket: Socket, performance: { now: () => monotonic }, Date: WallClock,
     Event: class { constructor(type) { this.type = type; } },
     Lampa: {
       Manifest: { app_version: '3.3.8' }, Activity: { active: () => ({}) },
@@ -58,9 +61,16 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
       Settings: { listener: { follow() {}, remove() {} } }, Listener: { follow() {}, remove() {} },
     },
   };
-  const source = readFileSync(new URL('../plugin/remote.js', import.meta.url), 'utf8').replace('__REMOTE_CONFIG__', JSON.stringify({ token: 'test', socket: 'ws://test', version: '0.2.0', protocolVersion: 1, sourceHash: 'fixture' }));
+  const source = readFileSync(new URL('../plugin/remote.js', import.meta.url), 'utf8').replace('__REMOTE_CONFIG__', JSON.stringify({ token: 'test', socket: 'ws://test', version: '0.2.0', protocolVersion: 1, sourceHash: 'fixture', browserWakeCode: 119, wakeTimeoutMs: 30 }));
   vm.runInNewContext(source, sandbox);
-  Socket.current.onopen();
+  function wake(type = 'keydown', repeat = false, code = 119) {
+    let prevented = false, stopped = false;
+    const event = { type, repeat, keyCode: code, preventDefault: () => { prevented = true; }, stopImmediatePropagation: () => { stopped = true; } };
+    listeners.get(type)?.fn(event);
+    return { prevented, stopped, capture: listeners.get(type)?.capture };
+  }
+  function open() { Socket.current.readyState = 1; Socket.current.onopen(); }
+  if (autoWake) { wake(); wake('keyup'); open(); }
   let sequence = 0;
   function send(method, params = {}, ttlMs = 1000) {
     const id = String(++sequence);
@@ -75,5 +85,5 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
     }
     assert.fail('Plugin did not respond to ' + id);
   }
-  return { send, response, sent, moved, field, appMirror, advance: ms => { monotonic += ms; }, stop: () => window.__lampaRemote.stop(), socket: Socket.current, actions: () => actions, warn: message => sandbox.console.warn(message) };
+  return { send, response, sent, moved, field, appMirror, advance: ms => { monotonic += ms; }, stop: () => window.__lampaRemote.stop(), socket: Socket.current, actions: () => actions, warn: message => sandbox.console.warn(message), wake, open, connections: () => connections, timers: () => timers.size, listeners, getSocket: () => Socket.current };
 }

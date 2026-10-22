@@ -9,16 +9,19 @@ import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { WebSocket } from 'ws';
 import { createBridge } from '../dist/bridge.js';
+import { fakeAdb } from './fake-adb.mjs';
+const environments = new Map();
 
 const executable = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 const token = 'a'.repeat(64);
 function state(t) {
   const directory = mkdtempSync(join(tmpdir(), 'lampa-cli-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
+  environments.set(directory, fakeAdb(t, { devices: '' }).env);
   return directory;
 }
 async function cli(directory, args, entry = executable) {
-  const p = spawn(process.execPath, [entry, ...args], { env: { ...process.env, LAMPA_REMOTE_STATE: directory }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const p = spawn(process.execPath, [entry, ...args], { env: { ...process.env, LAMPA_REMOTE_STATE: directory, ...environments.get(directory) }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = '';
   p.stdout.on('data', chunk => { stdout += chunk; }); p.stderr.on('data', chunk => { stderr += chunk; });
   const [status] = await once(p, 'close');
@@ -69,11 +72,12 @@ test('CLI emits JSON success on stdout, state errors on stderr, and redacts cred
   const bridge = createBridge({ token, port: 0 }); const port = await bridge.listen(); t.after(() => bridge.close());
   writeFileSync(join(directory, 'config.json'), JSON.stringify({ token, port }), { mode: 0o600 });
   const disconnected = await cli(directory, ['status']);
-  assert.equal(disconnected.status, 4);
+  assert.equal(disconnected.status, 3);
   assert.equal(disconnected.stdout, '');
-  assert.equal(JSON.parse(disconnected.stderr).error.code, 'TV_DISCONNECTED');
+  assert.equal(JSON.parse(disconnected.stderr).error.code, 'ADB_NO_DEVICE');
   const ws = new WebSocket(`ws://127.0.0.1:${port}/tv?token=${token}`); await once(ws, 'open');
-  ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 1 } }));
+  const h = (await (await fetch(`http://127.0.0.1:${port}/health?passive=1`, { headers: { Authorization: `Bearer ${token}` } })).json()).data;
+  ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 1, pluginVersion: h.version, sourceHash: h.sourceHash, browserWakeCode: 119, appready: true } }));
   ws.on('message', message => {
     const r = JSON.parse(message);
     if (r.method === 'settings.get') ws.send(JSON.stringify({ id: r.id, error: { code: 'SETTING_NOT_AVAILABLE' } }));

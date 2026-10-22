@@ -21,7 +21,7 @@
     function controller() { return Lampa.Controller.enabled().name; }
     function status() {
         var a = Lampa.Activity.active() || {};
-        return { pluginVersion: config.version, protocolVersion: config.protocolVersion, sourceHash: config.sourceHash, appVersion: Lampa.Manifest.app_version, appready: !!window.appready, origin: location.origin, component: a.component || null, title: clean(a.title), controller: controller(), settingsSection: settingsSection, visibility: document.visibilityState, viewport: { width: innerWidth, height: innerHeight }, at: Date.now() };
+        return { pluginVersion: config.version, protocolVersion: config.protocolVersion, browserWakeCode: config.browserWakeCode, sourceHash: config.sourceHash, appVersion: Lampa.Manifest.app_version, appready: !!window.appready, origin: location.origin, component: a.component || null, title: clean(a.title), controller: controller(), settingsSection: settingsSection, visibility: document.visibilityState, viewport: { width: innerWidth, height: innerHeight }, at: Date.now() };
     }
     function label(el) {
         var child = el.querySelector('.settings-param__name,.settings-folder__name,.menu__text,.card__title,.selectbox-item__title');
@@ -105,7 +105,8 @@
             field.dispatchEvent(new Event('change', { bubbles: true }));
             if (field.value !== p.text) error('INPUT_NOT_CONFIRMED');
         }
-        var mirror = Array.prototype.filter.call(document.querySelectorAll('.search__input,.settings-input__input'), function (el) { return el !== field && visible(el); });
+        var panel = field.closest('.settings-input,.search__body,.search-box');
+        var mirror = panel ? Array.prototype.filter.call(panel.querySelectorAll('.search__input,.settings-input__input'), function (el) { return el !== field && document.documentElement.contains(el); }) : [];
         var appText = mirror.length === 1 ? mirror[0].textContent.replace(/\u00a0/g, ' ') : null;
         return { value: clean(field.value), length: field.value.length, domWritten: p.text === undefined ? null : field.value === p.text, appConfirmed: p.text === undefined || appText === null ? null : appText === p.text, appText: appText === null ? null : clean(appText), submitted: false };
     }
@@ -158,9 +159,11 @@
         return { dispatched: true, state: ui(), note: 'DOM snapshot after dispatch; rendering and network completion are not asserted.' };
     }
     function connect() {
-        if (stopped) return;
+        if (stopped || socket) return;
         socket = new WebSocket(config.socket + '?token=' + encodeURIComponent(config.token));
-        socket.onopen = function () { send({ type: 'hello', data: status() }); };
+        var connection = socket;
+        timer = setTimeout(function () { if (connection.readyState < 2) connection.close(); }, config.wakeTimeoutMs);
+        socket.onopen = function () { clearTimeout(timer); send({ type: 'hello', data: status() }); };
         socket.onmessage = function (event) {
             var request;
             try { request = JSON.parse(event.data); } catch (e) { return; }
@@ -169,6 +172,7 @@
             chain = chain.then(async function () {
                 var start = performance.now();
                 try {
+                    if (socket !== connection || connection.readyState !== 1) error('COMMAND_CANCELLED');
                     if (performance.now() - receivedAt >= request.ttlMs) error('COMMAND_EXPIRED');
                     var result = await execute(request.method, request.params || {});
                     send({ id: request.id, result: result, executionMs: Math.round((performance.now() - start) * 10) / 10 });
@@ -176,26 +180,41 @@
                     send({ id: request.id, error: { code: /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'PLUGIN_ERROR' } }); }
             });
         };
-        socket.onclose = function () { if (!stopped) timer = setTimeout(connect, 1000); };
+        socket.onclose = function () { clearTimeout(timer); if (socket === connection) socket = null; };
         socket.onerror = function () {};
     }
-    var original = {};
+    function onWake(event) {
+        if (event.keyCode !== config.browserWakeCode && event.which !== config.browserWakeCode) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (event.type === 'keydown' && !event.repeat) connect();
+    }
+    var original = {}, wrappers = {};
     ['warn', 'error'].forEach(function (level) {
         original[level] = console[level];
-        console[level] = function () { original[level].apply(console, arguments); record(level, Array.prototype.map.call(arguments, function (v) { return typeof v === 'string' ? v : v && v.message ? v.message : '[object]'; }).join(' ')); };
+        wrappers[level] = function () { original[level].apply(console, arguments); record(level, Array.prototype.map.call(arguments, function (v) { return typeof v === 'string' ? v : v && v.message ? v.message : '[object]'; }).join(' ')); };
+        console[level] = wrappers[level];
     });
     function onError(e) { record('error', e.message || 'JavaScript error'); }
     function onRejection(e) { record('rejection', e.reason && e.reason.message || 'Unhandled promise rejection'); }
     window.addEventListener('error', onError);
     window.addEventListener('unhandledrejection', onRejection);
     function onSettings(e) { settingsSection = e.name; }
-    function ready() { Lampa.Settings.listener.follow('open', onSettings); connect(); }
+    function ready() {
+        Lampa.Listener.remove('app', onApp);
+        Lampa.Settings.listener.follow('open', onSettings);
+        window.addEventListener('keydown', onWake, true);
+        window.addEventListener('keyup', onWake, true);
+    }
+    function onApp(e) { if (e.type === 'ready') ready(); }
     window.__lampaRemote = { version: config.version, stop: function () {
         stopped = true; clearTimeout(timer); if (socket) socket.close();
+        window.removeEventListener('keydown', onWake, true); window.removeEventListener('keyup', onWake, true);
+        Lampa.Listener.remove('app', onApp);
         window.removeEventListener('error', onError); window.removeEventListener('unhandledrejection', onRejection);
         Lampa.Settings.listener.remove('open', onSettings);
-        ['warn', 'error'].forEach(function (level) { console[level] = original[level]; });
+        ['warn', 'error'].forEach(function (level) { if (console[level] === wrappers[level]) console[level] = original[level]; });
+        delete window.__lampaRemote;
     } };
     if (window.appready) ready();
-    else Lampa.Listener.follow('app', function onApp(e) { if (e.type === 'ready') { Lampa.Listener.remove('app', onApp); ready(); } });
+    else Lampa.Listener.follow('app', onApp);
 })(__REMOTE_CONFIG__);

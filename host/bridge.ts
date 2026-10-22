@@ -2,17 +2,33 @@ import http from 'node:http';
 import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { WebSocketServer, WebSocket } from 'ws';
-import { Envelope, Params, RemoteError, failure, isObject, protocolVersion, success, validateRpc, version } from './protocol.js';
+import { defaults } from './state.js';
+import { Envelope, Params, RemoteError, boundedShape, failure, isObject, protocolVersion, success, validateRpc, version } from './protocol.js';
 
 export const pluginFile = new URL('../plugin/remote.js', import.meta.url);
-export interface BridgeOptions { token: string; port?: number; timeout?: number }
-export function createBridge({ token, port = 18657, timeout = 5000 }: BridgeOptions) {
+export interface BridgeOptions { token: string; port?: number; timeout?: number; idleTimeoutMs?: number; wakeTimeoutMs?: number; browserWakeCode?: number }
+export function createBridge({ token, port = defaults.port, timeout = defaults.rpcTimeoutMs, idleTimeoutMs = defaults.idleTimeoutMs, wakeTimeoutMs = defaults.wakeTimeoutMs, browserWakeCode = defaults.browserWakeCode }: BridgeOptions) {
   let peer: WebSocket | null = null;
   let hello: unknown = null;
   let sequence = 0;
+  let active = 0;
+  let idleTimer: NodeJS.Timeout | undefined;
+  let stopping = false;
+  let closing: Promise<void> | undefined;
+  let lastPeerError: string | null = null;
+  let peerGeneration = 0;
+  const leases = new Set<http.ServerResponse>();
   const pending = new Map<string, { res: http.ServerResponse; timer: NodeJS.Timeout; started: number }>();
   const events: Params[] = [];
-  const sourceHash = () => createHash('sha256').update(readFileSync(pluginFile)).digest('hex');
+  const source = readFileSync(pluginFile, 'utf8');
+  const sourceHash = () => createHash('sha256').update(source).digest('hex');
+  const armIdle = () => { clearTimeout(idleTimer); if (!stopping && active === 0) idleTimer = setTimeout(() => { void close(); }, idleTimeoutMs); };
+  const hold = (res: http.ServerResponse) => {
+    clearTimeout(idleTimer); active++;
+    let released = false;
+    const release = () => { if (!released) { released = true; active--; leases.delete(res); armIdle(); } };
+    res.once('finish', release); res.once('close', release);
+  };
   const authorized = (value: unknown) => typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(token) && timingSafeEqual(Buffer.from(value), Buffer.from(token));
   const record = (event: Params) => { events.push({ ...event, sequence: ++sequence }); if (events.length > 200) events.shift(); };
   const reply = (res: http.ServerResponse, code: number, body: Envelope) => {
@@ -29,18 +45,22 @@ export function createBridge({ token, port = 18657, timeout = 5000 }: BridgeOpti
       }
       const credential = url.pathname === '/plugin.js' ? url.searchParams.get('token') : req.headers.authorization?.replace(/^Bearer /, '');
       if (!authorized(credential)) return reject(res, 401, 'UNAUTHORIZED', 'Bridge authentication failed.');
+      if (url.pathname !== '/plugin.js' && !(url.pathname === '/health' && url.searchParams.get('passive') === '1')) hold(res);
+      if (req.method === 'GET' && url.pathname === '/lease') {
+        leases.add(res); res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' }); res.flushHeaders(); return;
+      }
       if (req.method === 'GET' && url.pathname === '/plugin.js') {
         const address = server.address();
         if (!address || typeof address === 'string') throw new Error('Bridge has no port');
-        const config = { token, socket: `ws://127.0.0.1:${address.port}/tv`, version, protocolVersion, sourceHash: sourceHash() };
+        const config = { token, socket: `ws://127.0.0.1:${address.port}/tv`, version, protocolVersion, sourceHash: sourceHash(), browserWakeCode, wakeTimeoutMs };
         res.writeHead(200, { 'Content-Type': 'application/javascript', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
-        return res.end(readFileSync(pluginFile, 'utf8').replace('__REMOTE_CONFIG__', JSON.stringify(config)));
+        return res.end(source.replace('__REMOTE_CONFIG__', JSON.stringify(config)));
       }
-      if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, success({ version, protocolVersion, pid: process.pid, connected: !!peer, sourceHash: sourceHash(), hello }));
+      if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, success({ version, protocolVersion, pid: process.pid, connected: !!peer, ready: !!hello, lastPeerError, peerGeneration, idleTimeoutMs, active, sourceHash: sourceHash(), hello }));
       if (req.method === 'GET' && url.pathname === '/events') {
         const since = Number(url.searchParams.get('since') || 0);
         if (!Number.isSafeInteger(since) || since < 0) return reject(res, 400, 'INVALID_PARAMS', 'Event cursor must be a non-negative integer.', 2);
-        return reply(res, 200, success({ events: events.filter(e => Number(e.sequence) > since) }));
+        return reply(res, 200, success({ events: events.filter(e => Number(e.sequence) > since), connected: !!hello }));
       }
       if (req.method !== 'POST' || url.pathname !== '/rpc') return reject(res, 404, 'NOT_FOUND', 'Unknown bridge endpoint.', 2);
       const chunks: Buffer[] = [];
@@ -54,7 +74,8 @@ export function createBridge({ token, port = 18657, timeout = 5000 }: BridgeOpti
       try { value = JSON.parse(Buffer.concat(chunks).toString()); }
       catch { return reject(res, 400, 'INVALID_REQUEST', 'Request must contain valid JSON.', 2); }
       const input = validateRpc(value);
-      if (!peer || peer.readyState !== WebSocket.OPEN) return reject(res, 503, 'TV_DISCONNECTED', 'The Lampa plugin is not connected.', 4);
+      if (lastPeerError) return reject(res, 409, lastPeerError, 'Reload the Lampa Remote plugin to match this bridge.', 3);
+      if (!peer || peer.readyState !== WebSocket.OPEN || !hello) return reject(res, 503, 'TV_DISCONNECTED', 'The Lampa plugin is not connected.', 4);
       const id = randomUUID();
       const started = performance.now();
       const timer = setTimeout(() => {
@@ -77,15 +98,28 @@ export function createBridge({ token, port = 18657, timeout = 5000 }: BridgeOpti
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
   });
   wss.on('connection', ws => {
-    peer = ws;
+    peer = ws; hello = null; lastPeerError = null; peerGeneration++;
+    const handshake = setTimeout(() => { lastPeerError = 'HANDSHAKE_TIMEOUT'; ws.close(1008, lastPeerError); }, wakeTimeoutMs);
     ws.on('error', () => {});
     ws.on('message', data => {
       let message: unknown;
       try { message = JSON.parse(data.toString()); } catch { return; }
       if (!isObject(message)) return;
+      if (!boundedShape(message)) {
+        if (typeof message.id === 'string') {
+          const request = pending.get(message.id);
+          if (request) {
+            pending.delete(message.id); clearTimeout(request.timer);
+            reject(request.res, 502, 'INVALID_PEER_MESSAGE', 'The peer returned an unsafe message shape.', 4, 'unknown');
+          }
+        }
+        ws.terminate(); return;
+      }
       if (message.type === 'hello') {
-        if (!isObject(message.data) || message.data.protocolVersion !== protocolVersion) { ws.close(1008, 'PROTOCOL_MISMATCH'); return; }
-        hello = message.data; record({ type: 'connected', at: Date.now(), data: hello });
+        if (!isObject(message.data) || message.data.protocolVersion !== protocolVersion || message.data.pluginVersion !== version || message.data.sourceHash !== sourceHash() || message.data.appready !== true || message.data.browserWakeCode !== browserWakeCode) {
+          lastPeerError = 'PROTOCOL_MISMATCH'; clearTimeout(handshake); ws.close(1008, lastPeerError); return;
+        }
+        clearTimeout(handshake); lastPeerError = null; hello = message.data; record({ type: 'connected', at: Date.now(), data: hello });
       } else if (message.type === 'event') {
         if (isObject(message.data)) record({ type: 'tv', at: Date.now(), data: message.data });
       } else if (typeof message.id === 'string' && pending.has(message.id)) {
@@ -101,6 +135,7 @@ export function createBridge({ token, port = 18657, timeout = 5000 }: BridgeOpti
       }
     });
     ws.on('close', () => {
+      clearTimeout(handshake);
       if (peer !== ws) return;
       peer = null; hello = null;
       for (const request of pending.values()) {
@@ -112,9 +147,22 @@ export function createBridge({ token, port = 18657, timeout = 5000 }: BridgeOpti
   });
   const heartbeat = setInterval(() => { if (peer?.readyState === WebSocket.OPEN) peer.ping(); }, 20000);
   heartbeat.unref();
+  function close(): Promise<void> {
+    if (!closing) {
+      stopping = true;
+      clearTimeout(idleTimer); clearInterval(heartbeat);
+      closing = (async () => {
+        for (const lease of leases) lease.end();
+        if (peer) peer.terminate();
+        await new Promise<void>(resolve => wss.close(() => resolve()));
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      })();
+    }
+    return closing;
+  }
   return {
     server,
-    listen: () => new Promise<number>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { const address = server.address(); if (address && typeof address !== 'string') resolve(address.port); }); }),
-    close: async () => { clearInterval(heartbeat); if (peer) peer.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); },
+    listen: () => new Promise<number>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { const address = server.address(); if (address && typeof address !== 'string') { armIdle(); resolve(address.port); } }); }),
+    close,
   };
 }

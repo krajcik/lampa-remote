@@ -17,6 +17,19 @@ export class RemoteError extends Error {
 export const isObject = (value: unknown): value is Params => value !== null && typeof value === 'object' && !Array.isArray(value);
 export const sensitiveField = (key: string): boolean => /token|password|passwd|secret|cookie|email|login|authorization|account|credential|api.?key|key$|парол|токен|почт|логин|ключ|(^|[^a-z0-9])(key|auth|session|pass)(?=$|[^a-z0-9])/i.test(key);
 
+export function boundedShape(value: unknown): boolean {
+  const work: [unknown, number][] = [[value, 0]];
+  let count = 0;
+  while (work.length) {
+    const [item, depth] = work.pop()!;
+    if (++count > 20000 || depth > 32) return false;
+    if (item && typeof item === 'object') {
+      for (const child of Object.values(item)) work.push([child, depth + 1]);
+    }
+  }
+  return true;
+}
+
 export function redact(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redact);
   if (!isObject(value)) return value;
@@ -34,7 +47,7 @@ export function failure(error: unknown): Envelope & { ok: false } {
 }
 export function exitFor(error: unknown): number { return error instanceof RemoteError ? error.exitCode : 1; }
 export function validateRpc(value: unknown): { method: Method; params: Params } {
-  if (!isObject(value) || typeof value.method !== 'string' || !(methods as readonly string[]).includes(value.method) ||
+  if (!boundedShape(value) || !isObject(value) || typeof value.method !== 'string' || !(methods as readonly string[]).includes(value.method) ||
       (value.params !== undefined && !isObject(value.params))) {
     throw new RemoteError('INVALID_COMMAND', 'Expected a supported method and an object of parameters.', 2);
   }
