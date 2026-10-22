@@ -1,0 +1,6 @@
+interface:
+  display_name: "Lampa Remote"
+  short_description: "Установка и управление Lampa на TV через CLI"
+  default_prompt: "Используй $lampa-remote для установки, диагностики или управления Lampa через терминал."
+policy:
+  allow_implicit_invocation: true

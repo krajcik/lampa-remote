@@ -1,6 +1,13 @@
 {
   "name": "lampa-remote",
   "version": "0.2.0",
+  "description": "Terminal control and diagnostics for Lampa on Android TV over ADB",
+  "license": "MIT",
+  "author": "krajcik",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/krajcik/lampa-remote.git"
+  },
   "private": true,
   "type": "module",
   "bin": {
