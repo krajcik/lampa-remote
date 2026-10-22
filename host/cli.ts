@@ -48,7 +48,8 @@ Edit config.json there (0600); restart bridge to apply changed runtime values.
 Fields: port, serial, idleTimeoutMs (3600000), rpcTimeoutMs (5000),
 adbTimeoutMs (10000), wakeTimeoutMs (20000), wakeRetryIntervalMs (1000), appPackage, appActivity,
 androidWakeCode (KEYCODE_F8), browserWakeCode (119).
-Reload the plugin after changing the browser wake code.
+After changing token, port, browserWakeCode or wakeTimeoutMs, regenerate install-url,
+replace the TV URL and reload the plugin (keep its private # fragment).
 `;
 export function parse(argv: string[]): { command: string; args: string[]; rpc?: ReturnType<typeof validateRpc>; condition?: Params } {
   if (argv[0] === '--help' || argv[0] === 'help' || argv.length === 0 || argv.length === 2 && argv[1] === '--help') return { command: 'help', args: [] };
