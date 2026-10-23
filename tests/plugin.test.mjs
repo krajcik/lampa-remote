@@ -4,8 +4,41 @@ import { pluginFixture } from './plugin-fixture.mjs';
 import { defaults } from '../dist/state.js';
 import { version, protocolVersion } from '../dist/protocol.js';
 
+test('service wake answers during application startup without polling or duplicate ready handlers', async t => {
+  const f = pluginFixture({ appReady: false, autoWake: false }); t.after(f.stop);
+  assert.equal(f.connections(), 0); assert.equal(f.timers(), 0);
+  assert.equal(f.wake().prevented, true);
+  assert.equal(f.connections(), 1); f.open();
+  assert.equal(f.sent.find(item => item.type === 'hello').data.appready, false);
+  f.getSocket().close();
+  const listener = f.listeners.get('keydown'); f.readyApp(); f.readyApp();
+  assert.equal(f.listeners.get('keydown'), listener);
+  f.wake(); f.open();
+  assert.equal(f.sent.filter(item => item.type === 'hello').at(-1).data.appready, true);
+  assert.equal(f.connections(), 2);
+  assert.equal((await f.response(f.send('status'))).result.appready, true);
+});
+
+test('settings navigation closes the attached extensions overlay before changing controllers', async t => {
+  const f = pluginFixture({ settingsOverlay: true }); t.after(f.stop);
+  f.setController('select');
+  assert.equal((await f.response(f.send('settings.open'))).error?.code, 'DIALOG_ACTIVE');
+  assert.equal(f.actions(), 0); assert.equal(f.extensionsClosed(), 0);
+  f.setController('extensions_line');
+  assert.equal((await f.response(f.send('ui'))).result.totalVisible, 0);
+  const request = f.send('settings.open', { section: 'interface' });
+  const timeout = setTimeout(() => f.advance(2000), 50);
+  const result = await f.response(request); clearTimeout(timeout);
+  assert.equal(result.error, undefined);
+  assert.equal(result.result.dispatched, true);
+  assert.equal(f.extensionsClosed(), 1);
+  assert.equal((await f.response(f.send('ui'))).result.totalVisible > 0, true);
+  await f.response(f.send('settings.open'));
+  assert.equal(f.extensionsClosed(), 1);
+});
+
 test('public standalone script works without injection or HTTP loading, including cached custom options', async t => {
-  const base = 'https://krajcik.github.io/lampa-remote/plugin/remote.js?v=0.3.0';
+  const base = 'https://krajcik.github.io/lampa-remote/plugin/remote.js?v=0.3.1';
   for (const cached of [false, true]) {
     const f = pluginFixture({ autoWake: false, cached, installUrl: base }); t.after(f.stop);
     assert.equal(f.connections(), 0); assert.equal(f.timers(), 0);
@@ -57,6 +90,15 @@ test('credential fields are refused or redacted even when their values are short
   assert.equal(ui.result.items[0].value, '[redacted]');
   assert.doesNotMatch(JSON.stringify([settings, ui, field, input]), /DUMMY1234/);
   assert.equal(settings.result.settings.length, 1);
+});
+
+test('Russian extension toggles remain actionable while nearby credential diagnostics stay masked', async t => {
+  const f = pluginFixture({ replaceRows: true, rows: ['Отключить', 'Включить', 'Каталог Отключено', 'Ключ API ab', 'Отключить token ab'].map(text => ({ text })) }); t.after(f.stop);
+  const ui = await f.response(f.send('ui'));
+  assert.deepEqual(Array.from(ui.result.items, row => row.text), ['Отключить', 'Включить', 'Каталог Отключено', '[sensitive diagnostic redacted]', '[sensitive diagnostic redacted]']);
+  const action = await f.response(f.send('action', { text: 'Отключить' }));
+  assert.equal(action.error, undefined); assert.equal(f.actions(), 1);
+  assert.equal((await f.response(f.send('settings.get', { key: 'jackett_key' }))).error.code, 'SETTING_NOT_AVAILABLE');
 });
 
 test('input distinguishes DOM writes, application mismatch, confirmation and unavailable mirrors', async t => {

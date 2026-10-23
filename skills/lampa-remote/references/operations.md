@@ -1,6 +1,6 @@
 # Операционный справочник Lampa Remote
 
-Справочник соответствует CLI 0.3.0 / protocol 2.
+Справочник соответствует CLI 0.3.1 / protocol 2.
 Проверяй `--help` установленной версии, если синтаксис отличается.
 Примеры используют `node dist/cli.js` из корня клона; установленный `lampa` эквивалентен.
 
@@ -32,7 +32,7 @@
    JSON содержит публичную ссылку в `data.url`. Добавь её в Lampa:
    "Настройки" → "Расширения" → "Добавить плагин".
    Токен, loader и приватный файл URL не нужны. При стандартном конфиге ссылка:
-   `https://krajcik.github.io/lampa-remote/plugin/remote.js?v=0.3.0#`.
+   `https://krajcik.github.io/lampa-remote/plugin/remote.js?v=0.3.1#`.
    Сохраняй завершающий `#`: он удерживает добавляемые Lampa данные аккаунта вне HTTP-запроса.
    Для нестандартных port/browserWakeCode/wakeTimeoutMs команда добавляет несекретные
    параметры после `#lampa-remote=`; сохраняй ссылку целиком.
@@ -40,7 +40,7 @@
    Подключение WebSocket происходит только по служебной клавише CLI.
    Голый raw.githubusercontent.com URL не используй: его MIME не подходит для script.
 5. В рамках установки выполни явный `app restart`, затем `status` и `doctor`.
-   Успех: свежий `status` имеет `appready: true`, версии 0.3.0/protocol 2 совпадают
+   Успех: свежий `status` имеет `appready: true`, версии 0.3.1/protocol 2 совпадают
    с мостом, `doctor` — `ready: true`. Готовность экрана проверь `wait --screen CONTROLLER`.
    Сам `appready` не доказывает загрузку контента.
 
@@ -84,6 +84,8 @@
 | `logs [--follow]` | Буфер диагностики; follow выдаёт JSONL, удерживает мост; Ctrl+C — exit 130 |
 
 `ui` по умолчанию возвращает до 50 элементов, `--full` — до 150 и bounds/полный status.
+`settings open` сначала штатно закрывает открытую панель расширений, чтобы она
+не перекрывала настройки и не оставляла controller другого экрана.
 Явный `--limit` принимает 1..150. Допустим один фильтр:
 text — подстрока, key/section — точное совпадение.
 `totalVisible`, `matchedVisible`, `returned`, `truncated` показывают полноту выборки.
@@ -186,10 +188,13 @@ Help/version — текст; `logs --follow` — последовательно�
 - `CONFIG_MISSING/INVALID/PERMISSIONS`: исправь путь/JSON/права, сохрани параметры; не удаляй конфиг для обхода.
 - `ADB_NO_DEVICE/NOT_READY/AMBIGUOUS/NOT_FOUND`: проверь ADB и подтверждённый serial, подключение и авторизацию.
 - `APP_NOT_FOREGROUND/APP_HIDDEN`: обычная команда не открывает приложение; используй явный app start при разрешённом запуске.
+- `APP_NOT_READY`: плагин доступен, но Lampa ещё загружается; RPC не отправлена.
+  Дождись завершения загрузки и повтори команду. Перезапуск и переустановка плагина не нужны.
 - `BRIDGE_UNAVAILABLE` в doctor: мост выключен; пассивная диагностика не включает его. Рабочая команда или start включит.
 - `PROTOCOL_MISMATCH`: обнови согласованную пару host/plugin, пересобери CLI и перезагрузи плагин.
 - `PLUGIN_WAKE_TIMEOUT/TV_DISCONNECTED/TV_TIMEOUT`: проверь foreground/ADB/reverse и загрузку плагина; исход мутации выясняй чтением.
 - `STALE_TARGET/TARGET_NOT_FOUND/AMBIGUOUS_TARGET`: перечитай UI и уточни цель. Выбор первого совпадения не разрешён.
+- `DIALOG_ACTIVE` при `settings open`: поверх расширений открыт диалог; закрой его через `key back`, перечитай UI и повтори переход.
 - `SCREENSAVER_ACTIVE`: читай состояние пассивно; для порученного управления отправь одну явную key, затем перечитай UI.
 - `WAIT_TIMEOUT`: условие наблюдалось как невыполненное; это не неизвестный исход мутации.
   `WAIT_READ_TIMEOUT/WAIT_READ_FAILED` означают сбой чтения, не доказательство отсутствия цели.

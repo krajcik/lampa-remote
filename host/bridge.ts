@@ -65,7 +65,7 @@ export function createBridge({ port = defaults.port, timeout = defaults.rpcTimeo
       try { value = JSON.parse(Buffer.concat(chunks).toString()); }
       catch { return reject(res, 400, 'INVALID_REQUEST', 'Request must contain valid JSON.', 2); }
       const input = validateRpc(value);
-      if (lastPeerError) return reject(res, 409, lastPeerError, 'Reload the Lampa Remote plugin to match this bridge.', 3);
+      if (lastPeerError) return reject(res, 409, lastPeerError, lastPeerError === 'APP_NOT_READY' ? 'Lampa is still starting; no RPC was sent.' : 'Reload the Lampa Remote plugin to match this bridge.', 3);
       if (!peer || peer.readyState !== WebSocket.OPEN || !hello) return reject(res, 503, 'TV_DISCONNECTED', 'The Lampa plugin is not connected.', 4);
       const id = randomUUID();
       const started = performance.now();
@@ -107,9 +107,10 @@ export function createBridge({ port = defaults.port, timeout = defaults.rpcTimeo
         ws.terminate(); return;
       }
       if (message.type === 'hello') {
-        if (!isObject(message.data) || message.data.protocolVersion !== protocolVersion || message.data.pluginVersion !== version || message.data.origin !== appOrigin || message.data.appready !== true || message.data.browserWakeCode !== browserWakeCode) {
+        if (!isObject(message.data) || message.data.protocolVersion !== protocolVersion || message.data.pluginVersion !== version || message.data.origin !== appOrigin || typeof message.data.appready !== 'boolean' || message.data.browserWakeCode !== browserWakeCode) {
           lastPeerError = 'PROTOCOL_MISMATCH'; clearTimeout(handshake); ws.close(1008, lastPeerError); return;
         }
+        if (!message.data.appready) { lastPeerError = 'APP_NOT_READY'; clearTimeout(handshake); ws.close(1008, lastPeerError); return; }
         clearTimeout(handshake); lastPeerError = null; hello = message.data; record({ type: 'connected', at: Date.now(), data: hello });
       } else if (message.type === 'event') {
         if (isObject(message.data)) record({ type: 'tv', at: Date.now(), data: message.data });

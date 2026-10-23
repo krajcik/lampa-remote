@@ -37,7 +37,7 @@ test('help/version work through a symlink without TV or creating configuration',
   assert.equal(help.stderr, '');
   const version = await cli(directory, ['--version']);
   assert.equal(version.status, 0, version.stderr);
-  assert.match(version.stdout, /^0\.3\.0\n$/);
+  assert.match(version.stdout, /^0\.3\.1\n$/);
   assert.throws(() => readFileSync(join(directory, 'config.json')), { code: 'ENOENT' });
 });
 
@@ -58,7 +58,7 @@ test('install-url prints a public standalone URL without token or private URL fi
   const directory = state(t);
   const result = await cli(directory, ['install-url']);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { ok: true, data: { url: 'https://krajcik.github.io/lampa-remote/plugin/remote.js?v=0.3.0#' } });
+  assert.deepEqual(JSON.parse(result.stdout), { ok: true, data: { url: 'https://krajcik.github.io/lampa-remote/plugin/remote.js?v=0.3.1#' } });
   const file = join(directory, 'config.json');
   const config = JSON.parse(readFileSync(file, 'utf8'));
   const returned = JSON.parse(result.stdout).data.url;

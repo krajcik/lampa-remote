@@ -8,6 +8,8 @@ import { Adb } from './adb.js';
 import { Config, lockFile, releaseLock, stateDir, writePrivateJson } from './state.js';
 import { Envelope, Params, RemoteError, isObject, protocolVersion, version } from './protocol.js';
 
+const peerHint = (code: unknown): string => code === 'APP_NOT_READY' ? 'Lampa is still starting. Wait for it to finish loading, then retry; no RPC was sent.' : 'Reload the installed Lampa Remote plugin.';
+
 export async function request(c: Config, path: string, body?: unknown, signal?: AbortSignal): Promise<Envelope & { ok: true }> {
   let response: Response;
   try {
@@ -110,7 +112,7 @@ export async function ensurePeer(c: Config, current: Params): Promise<void> {
     while (performance.now() < deadline) {
       const next = await health(c, AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))));
       if (next.ready === true && isObject(next.hello)) return;
-      if (next.lastPeerError && (!current.lastPeerError || next.peerGeneration !== current.peerGeneration)) throw new RemoteError(String(next.lastPeerError), 'The plugin handshake was rejected.', 3, 'Reload the installed Lampa Remote plugin.');
+      if (next.lastPeerError && (!current.lastPeerError || next.peerGeneration !== current.peerGeneration)) throw new RemoteError(String(next.lastPeerError), 'The plugin handshake was rejected.', 3, peerHint(next.lastPeerError));
       if (performance.now() >= nextWake) {
         await adb.wake();
         nextWake = performance.now() + c.wakeRetryIntervalMs;
@@ -140,8 +142,8 @@ export async function doctor(c: Config): Promise<{ checks: Params; error?: Remot
   try {
     const h = await health(c);
     checks.bridge = { ok: true, pid: h.pid, idleTimeoutMs: h.idleTimeoutMs };
-    checks.plugin = h.lastPeerError ? failed(new RemoteError(String(h.lastPeerError), 'The plugin handshake was rejected.', 3, 'Reload the installed plugin.')) : h.connected ? { ok: true } : failed(new RemoteError('TV_DISCONNECTED', 'The plugin is disconnected.', 4, 'Run an ordinary command to attempt one foreground-guarded wake.'));
-    checks.protocol = h.ready ? { ok: true } : failed(new RemoteError(String(h.lastPeerError || 'HANDSHAKE_MISSING'), 'No compatible plugin handshake.', 3, 'Reload the plugin or check the wake signal.'));
+    checks.plugin = h.lastPeerError ? failed(new RemoteError(String(h.lastPeerError), 'The plugin handshake was rejected.', 3, peerHint(h.lastPeerError))) : h.connected ? { ok: true } : failed(new RemoteError('TV_DISCONNECTED', 'The plugin is disconnected.', 4, 'Run an ordinary command to attempt one foreground-guarded wake.'));
+    checks.protocol = h.ready ? { ok: true } : failed(new RemoteError(String(h.lastPeerError || 'HANDSHAKE_MISSING'), 'No compatible plugin handshake.', 3, h.lastPeerError ? peerHint(h.lastPeerError) : 'Reload the plugin or check the wake signal.'));
     if (h.ready) {
       try {
         const live = (await request(c, '/rpc', { method: 'status', params: {} })).data;

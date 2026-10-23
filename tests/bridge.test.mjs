@@ -25,6 +25,20 @@ async function fixture(t, timeout = 1000, appOrigin = 'http://lampa.mx') {
   return { url, call, tv, port, address: bridge.server.address() };
 }
 
+test('compatible startup hello reports APP_NOT_READY, rejects RPC, then accepts a fresh ready peer', async t => {
+  const f = await fixture(t);
+  const h = (await (await fetch(f.url + '/health')).json()).data;
+  const ws = new WebSocket(`ws://127.0.0.1:${f.port}/tv`, { origin: 'http://lampa.mx' }); await once(ws, 'open');
+  ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 2, pluginVersion: h.version, browserWakeCode: 119, origin: 'http://lampa.mx', appready: false } }));
+  const [, reason] = await once(ws, 'close'); assert.equal(reason.toString(), 'APP_NOT_READY');
+  const rejected = await f.call('key', { key: 'enter' });
+  assert.equal(rejected.body.error.code, 'APP_NOT_READY');
+  assert.equal(rejected.body.error.outcome, undefined);
+  const ready = await f.tv();
+  ready.on('message', data => { const r = JSON.parse(data); ready.send(JSON.stringify({ id: r.id, result: { ready: true } })); });
+  assert.deepEqual((await f.call()).body.data, { ready: true });
+});
+
 test('tokenless loopback API rejects browser HTTP, rebinding hosts and foreign or missing WS origins', async t => {
   const f = await fixture(t);
   assert.equal(f.address.address, '127.0.0.1');

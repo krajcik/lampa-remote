@@ -182,6 +182,30 @@ async function waitForWakes(f, count) {
   assert.fail('Expected service wake was not sent');
 }
 
+test('public CLI reports startup promptly without mutation replay and passive doctor keeps the cause', async t => {
+  const f = await fixture(t, { wakeTimeoutMs: 3000 });
+  const bridge = createBridge(f.c); await bridge.listen(); t.after(() => bridge.close());
+  const result = f.cli(['key', 'enter']); await waitForWakes(f, 1);
+  const h = await f.getHealth();
+  const ws = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv`, { origin: f.c.appOrigin }); await once(ws, 'open');
+  let mutations = 0; ws.on('message', () => mutations++);
+  const closed = once(ws, 'close');
+  ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 2, pluginVersion: h.version, browserWakeCode: f.c.browserWakeCode, origin: f.c.appOrigin, appready: false } }));
+  await closed;
+  const r = await result; assert.equal(r.status, 3, r.stderr);
+  const error = JSON.parse(r.stderr).error;
+  assert.equal(error.code, 'APP_NOT_READY'); assert.match(error.hint, /still starting/); assert.equal(error.outcome, undefined);
+  assert.equal(mutations, 0); assert.equal(f.adb.calls().filter(args => args.includes('keyevent')).length, 1);
+  const before = f.adb.calls();
+  const doctor = await f.cli(['doctor']); assert.equal(doctor.status, 3);
+  assert.equal(JSON.parse(doctor.stderr).error.code, 'APP_NOT_READY');
+  assert.match(JSON.parse(doctor.stderr).error.hint, /still starting/);
+  assert.ok(!f.adb.calls().slice(before.length).some(args => args.includes('input') || args.includes('reverse') || args.includes('am')));
+  const ready = await peer(f); assert.equal(ready.calls(), 0);
+  assert.equal((await f.cli(['status'])).status, 0); assert.equal(ready.calls(), 1);
+  ready.ws.close();
+});
+
 test('a late hook receives a later guarded service pulse, while the actual RPC dispatches once', async t => {
   const f = await fixture(t, { wakeTimeoutMs: 3000, wakeRetryIntervalMs: 80 });
   const bridge = createBridge(f.c); await bridge.listen(); t.after(() => bridge.close());

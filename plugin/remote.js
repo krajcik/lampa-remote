@@ -10,7 +10,9 @@
     function error(code) { throw new Error(code); }
     function clean(value) {
         var text = String(value || '');
-        if (sensitive.test(text)) return '[sensitive diagnostic redacted]';
+        // These Lampa UI words contain "ключ" but are not credential labels.
+        var diagnostic = text.replace(/(^|[^а-яё])(включить|отключить|отключено)(?=$|[^а-яё])/gi, '$1');
+        if (sensitive.test(diagnostic)) return '[sensitive diagnostic redacted]';
         return text.replace(/https?:\/\/[^\s"'<>]+/g, '[url]').replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, '[email]').replace(/\b[A-Za-z0-9_-]{32,}\b/g, '[opaque]').slice(0, 300);
     }
     function send(value) { if (socket && socket.readyState === 1) socket.send(JSON.stringify(value)); }
@@ -192,6 +194,13 @@
         if (method === 'settings.open') {
             var button = document.querySelector('.open--settings');
             if (!button) error('SETTINGS_BUTTON_NOT_FOUND');
+            var extensions = Lampa.Extensions && Lampa.Extensions.render(true);
+            if (extensions && document.documentElement.contains(extensions)) {
+                if (controller() !== 'extensions' && controller() !== 'extensions_line') error('DIALOG_ACTIVE');
+                Lampa.Controller.toggle('extensions');
+                Lampa.Controller.back();
+                await waitFor(function () { return !document.documentElement.contains(extensions); });
+            }
             resetScreensaverTimer();
             Lampa.Utils.trigger(button, 'hover:enter');
             await waitFor(function () { return document.body.classList.contains('settings--open'); });
@@ -283,8 +292,6 @@
     function ready() {
         Lampa.Listener.remove('app', onApp);
         Lampa.Settings.listener.follow('open', onSettings);
-        window.addEventListener('keydown', onWake, true);
-        window.addEventListener('keyup', onWake, true);
     }
     function onApp(e) { if (e.type === 'ready') ready(); }
     window.__lampaRemote = { version: config.version, stop: function () {
@@ -296,6 +303,8 @@
         ['warn', 'error'].forEach(function (level) { if (console[level] === wrappers[level]) console[level] = original[level]; });
         delete window.__lampaRemote;
     } };
+    window.addEventListener('keydown', onWake, true);
+    window.addEventListener('keyup', onWake, true);
     if (window.appready) ready();
     else Lampa.Listener.follow('app', onApp);
 })((function () {
@@ -321,6 +330,6 @@
             !Number.isInteger(options.wakeTimeoutMs) || options.wakeTimeoutMs < 1 || options.wakeTimeoutMs > 60000) throw new Error();
     } catch (_) { console.warn('Lampa Remote: invalid installation options.'); return null; }
     options.socket = 'ws://127.0.0.1:' + options.port + '/tv';
-    options.version = '0.3.0'; options.protocolVersion = 2;
+    options.version = '0.3.1'; options.protocolVersion = 2;
     return options;
 })());
