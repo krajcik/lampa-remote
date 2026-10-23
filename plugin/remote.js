@@ -1,5 +1,6 @@
 (function (config) {
     'use strict';
+    if (!config) return;
     if (window.__lampaRemote) return;
     Lampa.Manifest.plugins = { type: 'other', version: config.version, name: 'Lampa Remote', description: 'Local terminal control and diagnostics via ADB reverse', component: 'lampa_remote' };
     var socket, timer, stopped = false, chain = Promise.resolve();
@@ -37,7 +38,7 @@
     function uncovered() { if (screensaverActive() === true) error('SCREENSAVER_ACTIVE'); }
     function status() {
         var a = Lampa.Activity.active() || {};
-        return { pluginVersion: config.version, protocolVersion: config.protocolVersion, browserWakeCode: config.browserWakeCode, sourceHash: config.sourceHash, appVersion: Lampa.Manifest.app_version, appready: !!window.appready, origin: location.origin, component: a.component || null, title: clean(a.title), controller: controller(), settingsSection: settingsSection, screensaverActive: screensaverActive(), visibility: document.visibilityState, viewport: { width: innerWidth, height: innerHeight }, at: Date.now() };
+        return { pluginVersion: config.version, protocolVersion: config.protocolVersion, browserWakeCode: config.browserWakeCode, appVersion: Lampa.Manifest.app_version, appready: !!window.appready, origin: location.origin, component: a.component || null, title: clean(a.title), controller: controller(), settingsSection: settingsSection, screensaverActive: screensaverActive(), visibility: document.visibilityState, viewport: { width: innerWidth, height: innerHeight }, at: Date.now() };
     }
     function label(el) {
         var child = el.querySelector('.settings-param__name,.settings-folder__name,.menu__text,.card__title,.selectbox-item__title');
@@ -240,7 +241,7 @@
     }
     function connect() {
         if (stopped || socket) return;
-        socket = new WebSocket(config.socket + '?token=' + encodeURIComponent(config.token));
+        socket = new WebSocket(config.socket);
         var connection = socket;
         timer = setTimeout(function () { if (connection.readyState < 2) connection.close(); }, config.wakeTimeoutMs);
         socket.onopen = function () { clearTimeout(timer); send({ type: 'hello', data: status() }); };
@@ -297,4 +298,29 @@
     } };
     if (window.appready) ready();
     else Lampa.Listener.follow('app', onApp);
-})(__REMOTE_CONFIG__);
+})((function () {
+    var base = 'https://krajcik.github.io/lampa-remote/plugin/remote.js';
+    var options = { port: 18657, browserWakeCode: 119, wakeTimeoutMs: 20000 };
+    var source = document.currentScript && document.currentScript.src;
+    if (!source) {
+        var stored = Lampa.Storage.get('plugins', []);
+        var urls = Array.isArray(stored) ? stored.filter(function (item) { return typeof item === 'string' || item && item.status === 1; }).map(function (item) {
+            return typeof item === 'string' ? item : item.url;
+        }).filter(function (url) { return typeof url === 'string' && url.split(/[?#]/)[0] === base; }) : [];
+        if (urls.length > 1) { console.warn('Lampa Remote: more than one active installation.'); return null; }
+        source = urls[0];
+    }
+    try {
+        if (source && source.indexOf('#lampa-remote=') >= 0) {
+            var custom = JSON.parse(decodeURIComponent(source.split('#lampa-remote=')[1].split(/[?&]/)[0]));
+            if (!custom || typeof custom !== 'object' || Array.isArray(custom) || Object.keys(custom).some(function (key) { return !Object.prototype.hasOwnProperty.call(options, key); })) throw new Error();
+            Object.keys(custom).forEach(function (key) { options[key] = custom[key]; });
+        }
+        if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535 ||
+            !Number.isInteger(options.browserWakeCode) || options.browserWakeCode < 1 || options.browserWakeCode > 65535 ||
+            !Number.isInteger(options.wakeTimeoutMs) || options.wakeTimeoutMs < 1 || options.wakeTimeoutMs > 60000) throw new Error();
+    } catch (_) { console.warn('Lampa Remote: invalid installation options.'); return null; }
+    options.socket = 'ws://127.0.0.1:' + options.port + '/tv';
+    options.version = '0.3.0'; options.protocolVersion = 2;
+    return options;
+})());

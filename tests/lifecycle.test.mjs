@@ -21,7 +21,7 @@ async function freePort() {
 }
 async function fixture(t, options = {}, fake = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lampa-lifecycle-'));
-  const c = { ...defaults, token, port: await freePort(), ...options };
+  const c = { ...defaults, port: await freePort(), ...options };
   const adb = fakeAdb(t, fake);
   const save = data => writeFileSync(join(directory, 'config.json'), JSON.stringify(data), { mode: 0o600 }); save(c);
   const start = args => {
@@ -37,13 +37,13 @@ async function fixture(t, options = {}, fake = {}) {
     rmSync(directory, { recursive: true, force: true });
   });
   const url = `http://127.0.0.1:${c.port}`;
-  const getHealth = async () => (await (await fetch(url + '/health?passive=1', { headers: { Authorization: `Bearer ${token}` } })).json()).data;
+  const getHealth = async () => (await (await fetch(url + '/health?passive=1', { headers: { 'Content-Type': 'application/json' } })).json()).data;
   return { c, directory, adb, cli, start, save, url, getHealth };
 }
 async function peer(f, responder = true, observed = {}) {
   const h = await f.getHealth();
-  const status = { protocolVersion: 1, pluginVersion: h.version, sourceHash: h.sourceHash, browserWakeCode: f.c.browserWakeCode, appready: true, visibility: 'visible', ...observed };
-  const ws = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv?token=${token}`); await once(ws, 'open');
+  const status = { protocolVersion: 2, pluginVersion: h.version, browserWakeCode: f.c.browserWakeCode, origin: f.c.appOrigin, appready: true, visibility: 'visible', ...observed };
+  const ws = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv`, { origin: 'http://lampa.mx' }); await once(ws, 'open');
   ws.send(JSON.stringify({ type: 'hello', data: status }));
   let calls = 0;
   ws.on('message', data => { calls++; const r = JSON.parse(data); if (responder) ws.send(JSON.stringify({ id: r.id, result: status })); });
@@ -62,28 +62,29 @@ test('runtime defaults are explicit; old token+port config remains compatible', 
   assert.deepEqual(f.adb.calls(), []);
 });
 
-test('concurrent cold starts share one token, owner and bridge; port edits never create a second daemon', async t => {
+test('concurrent cold starts share one configuration, owner and bridge; port edits never create a second daemon', async t => {
   const f = await fixture(t);
   const results = await Promise.all(Array.from({ length: 6 }, () => f.cli(['bridge'])));
   for (const r of results) assert.equal(r.status, 0, r.stderr);
   const pids = new Set(results.map(r => JSON.parse(r.stdout).data.pid)); assert.equal(pids.size, 1);
   const lock = JSON.parse(readFileSync(join(f.directory, 'bridge.lock'), 'utf8')); assert.equal(lock.pid, [...pids][0]);
-  assert.equal(JSON.parse(readFileSync(join(f.directory, 'config.json'), 'utf8')).token, token);
+  assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(f.directory, 'config.json'), 'utf8')), 'token'), false);
   f.save({ ...f.c, port: await freePort() });
   const changed = await f.cli(['bridge']); assert.equal(changed.status, 3);
   assert.equal(JSON.parse(changed.stderr).error.code, 'BRIDGE_CONFIG_CHANGED');
   assert.deepEqual(f.adb.calls(), []);
 });
 
-test('atomic first config publication and invalid edits never leak or regenerate credentials', async t => {
+test('atomic first config publication and invalid edits never reset settings or add credentials', async t => {
   const f = await fixture(t); rmSync(join(f.directory, 'config.json'));
   const results = await Promise.all(Array.from({ length: 6 }, () => f.cli(['install-url'])));
   for (const r of results) assert.equal(r.status, 0, r.stderr);
   const created = JSON.parse(readFileSync(join(f.directory, 'config.json'), 'utf8'));
   assert.equal(created.idleTimeoutMs, 3600000);
-  assert.match(readFileSync(join(f.directory, 'install-url.txt'), 'utf8'), new RegExp(created.token));
-  for (const r of results) assert.ok(!r.stdout.includes(created.token));
-  for (const extra of [{ constructor: 'bad' }, { toString: 'bad' }, { idleTimeoutMs: 0 }, { rpcTimeoutMs: '5000' }, { wakeRetryIntervalMs: 0 }, { wakeRetryIntervalMs: '1000' }, { wakeRetryIntervalMs: 60001 }, { appPackage: 'bad;cmd' }, { browserWakeCode: -1 }]) {
+  assert.equal(Object.hasOwn(created, 'token'), false);
+  assert.equal(new Set(results.map(r => JSON.parse(r.stdout).data.url)).size, 1);
+  assert.throws(() => readFileSync(join(f.directory, 'install-url.txt')), { code: 'ENOENT' });
+  for (const extra of [{ constructor: 'bad' }, { toString: 'bad' }, { idleTimeoutMs: 0 }, { rpcTimeoutMs: '5000' }, { wakeRetryIntervalMs: 0 }, { wakeRetryIntervalMs: '1000' }, { wakeRetryIntervalMs: 60001 }, { appPackage: 'bad;cmd' }, { browserWakeCode: -1 }, { appOrigin: 'file://' }, { appOrigin: 'http://user:pass@lampa.mx' }, { appOrigin: 'http://lampa.mx/path' }]) {
     f.save({ ...f.c, ...extra }); const r = await f.cli(['app', 'start']);
     assert.equal(r.status, 3, r.stderr); assert.equal(JSON.parse(r.stderr).error.code, 'CONFIG_INVALID');
   }
@@ -106,7 +107,7 @@ test('active RPC holds past idle, and plugin events do not prolong an idle bridg
   const bridge = createBridge({ ...f.c, timeout: 1000 }); await bridge.listen(); t.after(() => bridge.close());
   const p = await peer(f, false);
   p.ws.on('message', data => { const r = JSON.parse(data); setTimeout(() => p.ws.send(JSON.stringify({ id: r.id, result: { done: true } })), 250); });
-  const response = fetch(f.url + '/rpc', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({ method: 'status' }) });
+  const response = fetch(f.url + '/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ method: 'status' }) });
   await delay(160); assert.equal(bridge.server.listening, true);
   assert.equal((await (await response).json()).data.done, true);
   const closed = once(bridge.server, 'close');
@@ -116,7 +117,7 @@ test('active RPC holds past idle, and plugin events do not prolong an idle bridg
 
 test('a live HTTP lease holds idle and releases on cancellation or socket disconnect', async t => {
   const f = await fixture(t, { idleTimeoutMs: 80 }); const bridge = createBridge(f.c); await bridge.listen(); t.after(() => bridge.close());
-  const held = await fetch(f.url + '/lease', { headers: { Authorization: `Bearer ${token}` } });
+  const held = await fetch(f.url + '/lease', { headers: { 'Content-Type': 'application/json' } });
   await delay(160); assert.equal(bridge.server.listening, true);
   const closed = once(bridge.server, 'close'); await held.body.cancel(); await closed;
 });
@@ -149,7 +150,7 @@ test('cold ordinary RPC wakes once after guard and then warm RPC never invokes A
   const f = await fixture(t);
   if (recover) {
     const bridge = createBridge(f.c); await bridge.listen(); t.after(() => bridge.close());
-    const bad = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv?token=${token}`); await once(bad, 'open');
+    const bad = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv`, { origin: 'http://lampa.mx' }); await once(bad, 'open');
     const closed = once(bad, 'close'); bad.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 999 } })); await closed;
     assert.equal((await f.getHealth()).lastPeerError, 'PROTOCOL_MISMATCH');
   }
@@ -203,7 +204,7 @@ test('wake retries stop on foreground switch, fresh protocol rejection or the to
     await waitForWakes(f, 1);
     if (reason === 'foreground') f.adb.update({ foreground: 'com.google.android.tvlauncher' });
     if (reason === 'protocol') {
-      const ws = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv?token=${token}`); await once(ws, 'open');
+      const ws = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv`, { origin: 'http://lampa.mx' }); await once(ws, 'open');
       const closed = once(ws, 'close'); ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 999 } })); await closed;
     }
     const r = await result;
@@ -254,7 +255,7 @@ test('logs --follow holds idle and releases on SIGINT or TV disconnect without r
   for (const disconnect of [false, true]) {
     const f = await fixture(t, { idleTimeoutMs: 100 });
     const bridge = createBridge(f.c); await bridge.listen(); t.after(() => bridge.close());
-    const held = await fetch(f.url + '/lease', { headers: { Authorization: `Bearer ${token}` } });
+    const held = await fetch(f.url + '/lease', { headers: { 'Content-Type': 'application/json' } });
     const p = await peer(f);
     const running = f.start(['logs', '--follow']);
     t.after(async () => { if (running.child.exitCode === null) running.child.kill('SIGINT'); await running.result; });
@@ -277,7 +278,7 @@ test('doctor distinguishes foreground, missing handshake and incompatible protoc
     const bridge = createBridge(f.c); await bridge.listen(); t.after(() => bridge.close());
     if (stage === 'foreground') await peer(f);
     else {
-      const ws = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv?token=${token}`); await once(ws, 'open');
+      const ws = new WebSocket(`ws://127.0.0.1:${f.c.port}/tv`, { origin: 'http://lampa.mx' }); await once(ws, 'open');
       if (stage === 'protocol') { const closed = once(ws, 'close'); ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 999 } })); await closed; }
     }
     const result = await f.cli(['doctor']); assert.equal(result.status, 3, result.stderr);

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
@@ -8,9 +8,9 @@ export const stateDir = resolve(process.env.LAMPA_REMOTE_STATE || fileURLToPath(
 export const defaults = {
   port: 18657, idleTimeoutMs: 3600000, rpcTimeoutMs: 5000, adbTimeoutMs: 10000, wakeTimeoutMs: 20000, wakeRetryIntervalMs: 1000,
   serial: null as string | null, appPackage: 'ru.twicker.lampa', appActivity: '.ui.MainActivity',
-  androidWakeCode: 'KEYCODE_F8', browserWakeCode: 119,
+  androidWakeCode: 'KEYCODE_F8', browserWakeCode: 119, appOrigin: 'http://lampa.mx',
 };
-export type Config = typeof defaults & { token: string };
+export type Config = typeof defaults;
 
 export function writePrivateJson(file: string, data: unknown, exclusive = false): void {
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -29,16 +29,19 @@ export function config(create = true): Config {
     if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw new RemoteError('CONFIG_UNREADABLE', 'Could not read the private configuration.', 3, 'Check state directory permissions.');
     if (!create) throw new RemoteError('CONFIG_MISSING', 'No private configuration exists.', 3, 'Run lampa start to initialize it.');
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    try { writePrivateJson(file, { token: randomBytes(32).toString('hex'), ...defaults }, true); }
+    try { writePrivateJson(file, defaults, true); }
     catch (error) { if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') throw error; }
     return config(false);
   }
   let value: unknown;
   try { value = JSON.parse(raw); } catch { throw new RemoteError('CONFIG_INVALID', 'Configuration is not valid JSON.', 3, 'Finish the edit before running a command; use an atomic file replacement.'); }
   if (!isObject(value) || Object.keys(value).some(key => key !== 'token' && !Object.hasOwn(defaults, key))) throw new RemoteError('CONFIG_INVALID', 'Unknown configuration field or invalid object.');
-  const c = { ...defaults, ...value } as Config;
+  const { token: legacyToken, ...runtime } = value;
+  const c = { ...defaults, ...runtime } as Config;
   const integer = (v: unknown, min: number, max: number) => Number.isInteger(v) && Number(v) >= min && Number(v) <= max;
-  if (typeof c.token !== 'string' || !/^[a-f0-9]{64}$/i.test(c.token) || !integer(c.port, 1, 65535) ||
+  let origin: URL | undefined;
+  try { origin = new URL(c.appOrigin); } catch { /* Validated below. */ }
+  if (!integer(c.port, 1, 65535) || !origin || origin.origin !== c.appOrigin || !['http:', 'https:'].includes(origin.protocol) ||
       !integer(c.idleTimeoutMs, 1, 604800000) || !integer(c.rpcTimeoutMs, 1, 60000) || !integer(c.adbTimeoutMs, 1, 60000) || !integer(c.wakeTimeoutMs, 1, 60000) || !integer(c.wakeRetryIntervalMs, 1, 60000) ||
       (c.serial !== null && (typeof c.serial !== 'string' || !/^[\w.:[\]-]{1,200}$/.test(c.serial))) ||
       typeof c.appPackage !== 'string' || !/^[a-zA-Z]\w*(?:\.\w+)+$/.test(c.appPackage) ||

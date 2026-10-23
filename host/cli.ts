@@ -1,11 +1,10 @@
 #!/usr/bin/env node
-import { chmodSync, realpathSync, writeFileSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createBridge } from './bridge.js';
 import { Adb } from './adb.js';
-import { config, releaseLock, stateDir } from './state.js';
+import { config, defaults, releaseLock } from './state.js';
 import { doctor, ensureBridge, ensurePeer, health, lease, request } from './runtime.js';
 import { parseAgent, waitForState } from './agent-commands.js';
 import { Envelope, Params, RemoteError, exitFor, failure, isObject, success, validateRpc, version } from './protocol.js';
@@ -20,7 +19,7 @@ Bridge:
   bridge                         Start/read bridge health
   doctor                         Diagnose without starting bridge or waking TV
   app start|stop|restart         Explicit Android application lifecycle
-  install-url                    Write installation URL to private state file
+  install-url                    Print the public standalone plugin URL as JSON
 
 Lampa (must already be running):
   status | player                Read plugin or video state
@@ -47,9 +46,9 @@ LAMPA_REMOTE_STATE overrides the private .local/ state directory.
 Edit config.json there (0600); restart bridge to apply changed runtime values.
 Fields: port, serial, idleTimeoutMs (3600000), rpcTimeoutMs (5000),
 adbTimeoutMs (10000), wakeTimeoutMs (20000), wakeRetryIntervalMs (1000), appPackage, appActivity,
-androidWakeCode (KEYCODE_F8), browserWakeCode (119).
-After changing token, port, browserWakeCode or wakeTimeoutMs, regenerate install-url,
-replace the TV URL and reload the plugin (keep its private # fragment).
+androidWakeCode (KEYCODE_F8), browserWakeCode (119), appOrigin (http://lampa.mx).
+After changing port, browserWakeCode or wakeTimeoutMs, regenerate install-url,
+replace the TV URL and reload the plugin. No transport token or loader is needed.
 `;
 export function parse(argv: string[]): { command: string; args: string[]; rpc?: ReturnType<typeof validateRpc>; condition?: Params } {
   if (argv[0] === '--help' || argv[0] === 'help' || argv.length === 0 || argv.length === 2 && argv[1] === '--help') return { command: 'help', args: [] };
@@ -112,11 +111,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     throw new RemoteError('BRIDGE_STOP_NOT_CONFIRMED', 'Bridge shutdown was not confirmed.', 4);
   }
   if (command === 'install-url') {
-    const file = join(stateDir, 'install-url.txt');
-    const pairing = { url: `http://127.0.0.1:${c.port}/plugin.js?token=${c.token}`, browserWakeCode: c.browserWakeCode, wakeTimeoutMs: c.wakeTimeoutMs };
-    const url = 'https://krajcik.github.io/lampa-remote/plugin/loader.js#lampa-remote=' + encodeURIComponent(JSON.stringify(pairing));
-    writeFileSync(file, `${url}\n`, { mode: 0o600 }); chmodSync(file, 0o600);
-    output(success({ file })); return;
+    const options = { port: c.port, browserWakeCode: c.browserWakeCode, wakeTimeoutMs: c.wakeTimeoutMs };
+    const custom = Object.entries(options).some(([key, value]) => value !== defaults[key as keyof typeof options]);
+    // Lampa appends account metadata; keep it after # and out of the HTTP request.
+    const url = `https://krajcik.github.io/lampa-remote/plugin/remote.js?v=${version}` + (custom ? '#lampa-remote=' + encodeURIComponent(JSON.stringify(options)) : '#');
+    output(success({ url })); return;
   }
   const current = await ensureBridge(c);
   const release = await lease(c);

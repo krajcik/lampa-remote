@@ -1,13 +1,11 @@
 import http from 'node:http';
-import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { defaults } from './state.js';
 import { Envelope, Params, RemoteError, boundedShape, failure, isObject, protocolVersion, success, validateRpc, version } from './protocol.js';
 
-export const pluginFile = new URL('../plugin/remote.js', import.meta.url);
-export interface BridgeOptions { token: string; port?: number; timeout?: number; idleTimeoutMs?: number; wakeTimeoutMs?: number; browserWakeCode?: number }
-export function createBridge({ token, port = defaults.port, timeout = defaults.rpcTimeoutMs, idleTimeoutMs = defaults.idleTimeoutMs, wakeTimeoutMs = defaults.wakeTimeoutMs, browserWakeCode = defaults.browserWakeCode }: BridgeOptions) {
+export interface BridgeOptions { port?: number; timeout?: number; idleTimeoutMs?: number; wakeTimeoutMs?: number; browserWakeCode?: number; appOrigin?: string }
+export function createBridge({ port = defaults.port, timeout = defaults.rpcTimeoutMs, idleTimeoutMs = defaults.idleTimeoutMs, wakeTimeoutMs = defaults.wakeTimeoutMs, browserWakeCode = defaults.browserWakeCode, appOrigin = defaults.appOrigin }: BridgeOptions) {
   let peer: WebSocket | null = null;
   let hello: unknown = null;
   let sequence = 0;
@@ -20,8 +18,6 @@ export function createBridge({ token, port = defaults.port, timeout = defaults.r
   const leases = new Set<http.ServerResponse>();
   const pending = new Map<string, { res: http.ServerResponse; timer: NodeJS.Timeout; started: number }>();
   const events: Params[] = [];
-  const source = readFileSync(pluginFile, 'utf8');
-  const sourceHash = () => createHash('sha256').update(source).digest('hex');
   const armIdle = () => { clearTimeout(idleTimer); if (!stopping && active === 0) idleTimer = setTimeout(() => { void close(); }, idleTimeoutMs); };
   const hold = (res: http.ServerResponse) => {
     clearTimeout(idleTimer); active++;
@@ -29,7 +25,10 @@ export function createBridge({ token, port = defaults.port, timeout = defaults.r
     const release = () => { if (!released) { released = true; active--; leases.delete(res); armIdle(); } };
     res.once('finish', release); res.once('close', release);
   };
-  const authorized = (value: unknown) => typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(token) && timingSafeEqual(Buffer.from(value), Buffer.from(token));
+  const localHost = (req: http.IncomingMessage) => {
+    const address = server.address();
+    return address && typeof address !== 'string' && [`127.0.0.1:${address.port}`, `localhost:${address.port}`].includes(req.headers.host || '');
+  };
   const record = (event: Params) => { events.push({ ...event, sequence: ++sequence }); if (events.length > 200) events.shift(); };
   const reply = (res: http.ServerResponse, code: number, body: Envelope) => {
     if (res.destroyed || res.writableEnded) return;
@@ -40,23 +39,15 @@ export function createBridge({ token, port = defaults.port, timeout = defaults.r
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url || '/', 'http://127.0.0.1');
-      if ((req.headers.origin && url.pathname !== '/plugin.js') || !['127.0.0.1', 'localhost'].includes((req.headers.host || '').split(':')[0])) {
+      if (!localHost(req) || req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined) {
         return reject(res, 403, 'ORIGIN_OR_HOST_REJECTED', 'Only local non-browser API requests are accepted.');
       }
-      const credential = url.pathname === '/plugin.js' ? url.searchParams.get('token') : req.headers.authorization?.replace(/^Bearer /, '');
-      if (!authorized(credential)) return reject(res, 401, 'UNAUTHORIZED', 'Bridge authentication failed.');
-      if (url.pathname !== '/plugin.js' && !(url.pathname === '/health' && url.searchParams.get('passive') === '1')) hold(res);
+      if (req.method === 'POST' && req.headers['content-type']?.split(';')[0].trim() !== 'application/json') return reject(res, 415, 'INVALID_CONTENT_TYPE', 'Use application/json.', 2);
+      if (!(url.pathname === '/health' && url.searchParams.get('passive') === '1')) hold(res);
       if (req.method === 'GET' && url.pathname === '/lease') {
         leases.add(res); res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' }); res.flushHeaders(); return;
       }
-      if (req.method === 'GET' && url.pathname === '/plugin.js') {
-        const address = server.address();
-        if (!address || typeof address === 'string') throw new Error('Bridge has no port');
-        const config = { token, socket: `ws://127.0.0.1:${address.port}/tv`, version, protocolVersion, sourceHash: sourceHash(), browserWakeCode, wakeTimeoutMs };
-        res.writeHead(200, { 'Content-Type': 'application/javascript', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
-        return res.end(source.replace('__REMOTE_CONFIG__', JSON.stringify(config)));
-      }
-      if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, success({ version, protocolVersion, pid: process.pid, connected: !!peer, ready: !!hello, lastPeerError, peerGeneration, idleTimeoutMs, active, sourceHash: sourceHash(), hello }));
+      if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, success({ version, protocolVersion, pid: process.pid, connected: !!peer, ready: !!hello, lastPeerError, peerGeneration, idleTimeoutMs, active, hello }));
       if (req.method === 'GET' && url.pathname === '/events') {
         const since = Number(url.searchParams.get('since') || 0);
         if (!Number.isSafeInteger(since) || since < 0) return reject(res, 400, 'INVALID_PARAMS', 'Event cursor must be a non-negative integer.', 2);
@@ -94,7 +85,7 @@ export function createBridge({ token, port = defaults.port, timeout = defaults.r
     let url: URL;
     try { url = new URL(req.url || '/', 'http://127.0.0.1'); }
     catch { socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n'); return; }
-    if (url.pathname !== '/tv' || !authorized(url.searchParams.get('token')) || peer) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
+    if (!localHost(req) || req.headers.origin !== appOrigin || url.pathname !== '/tv' || url.search || peer) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
   });
   wss.on('connection', ws => {
@@ -116,7 +107,7 @@ export function createBridge({ token, port = defaults.port, timeout = defaults.r
         ws.terminate(); return;
       }
       if (message.type === 'hello') {
-        if (!isObject(message.data) || message.data.protocolVersion !== protocolVersion || message.data.pluginVersion !== version || message.data.sourceHash !== sourceHash() || message.data.appready !== true || message.data.browserWakeCode !== browserWakeCode) {
+        if (!isObject(message.data) || message.data.protocolVersion !== protocolVersion || message.data.pluginVersion !== version || message.data.origin !== appOrigin || message.data.appready !== true || message.data.browserWakeCode !== browserWakeCode) {
           lastPeerError = 'PROTOCOL_MISMATCH'; clearTimeout(handshake); ws.close(1008, lastPeerError); return;
         }
         clearTimeout(handshake); lastPeerError = null; hello = message.data; record({ type: 'connected', at: Date.now(), data: hello });

@@ -14,7 +14,6 @@ import { fakeAdb } from './fake-adb.mjs';
 import { pluginFixture } from './plugin-fixture.mjs';
 
 const executable = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
-const token = 'a'.repeat(64);
 async function until(check) {
   for (let i = 0; i < 200; i++) { if (check()) return; await delay(5); }
   assert.fail('Expected test observation was not reached');
@@ -22,12 +21,11 @@ async function until(check) {
 async function fixture(t, options = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lampa-agent-'));
   const adb = fakeAdb(t, { devices: '' });
-  const bridge = createBridge({ token, port: 0, timeout: 500 }); const port = await bridge.listen();
-  const c = { ...defaults, token, port, rpcTimeoutMs: 500 };
+  const bridge = createBridge({ port: 0, timeout: 500 }); const port = await bridge.listen();
+  const c = { ...defaults, port, rpcTimeoutMs: 500 };
   writeFileSync(join(directory, 'config.json'), JSON.stringify(c), { mode: 0o600 });
-  const h = (await (await fetch(`http://127.0.0.1:${port}/health?passive=1`, { headers: { Authorization: `Bearer ${token}` } })).json()).data;
-  const model = pluginFixture({ replaceRows: true, ...options, remoteConfig: { sourceHash: h.sourceHash, version: h.version } });
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/tv?token=${token}`); await once(ws, 'open');
+  const model = pluginFixture({ replaceRows: true, ...options, remoteConfig: { port } });
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/tv`, { origin: 'http://lampa.mx' }); await once(ws, 'open');
   ws.send(JSON.stringify(model.sent.find(item => item.type === 'hello')));
   const calls = [];
   let dropReads = false;

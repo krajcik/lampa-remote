@@ -1,6 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pluginFixture } from './plugin-fixture.mjs';
+import { defaults } from '../dist/state.js';
+import { version, protocolVersion } from '../dist/protocol.js';
+
+test('public standalone script works without injection or HTTP loading, including cached custom options', async t => {
+  const base = 'https://krajcik.github.io/lampa-remote/plugin/remote.js?v=0.3.0';
+  for (const cached of [false, true]) {
+    const f = pluginFixture({ autoWake: false, cached, installUrl: base }); t.after(f.stop);
+    assert.equal(f.connections(), 0); assert.equal(f.timers(), 0);
+    f.wake(); assert.equal(f.getSocket().url, `ws://127.0.0.1:${defaults.port}/tv`);
+    f.open(); const status = await f.response(f.send('status'));
+    assert.equal(status.result.pluginVersion, version); assert.equal(status.result.protocolVersion, protocolVersion);
+    assert.equal(status.result.browserWakeCode, defaults.browserWakeCode);
+    assert.equal(status.result.sourceHash, undefined);
+    const listener = f.listeners.get('keydown'); f.run(); assert.equal(f.listeners.get('keydown'), listener);
+  }
+  const custom = pluginFixture({ autoWake: false, cached: true, remoteConfig: { port: 20000, browserWakeCode: 120, wakeTimeoutMs: 25 } }); t.after(custom.stop);
+  custom.wake(); assert.equal(custom.connections(), 0);
+  custom.wake('keydown', false, 120); assert.equal(custom.getSocket().url, 'ws://127.0.0.1:20000/tv');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(custom.timers(), 0); assert.equal(custom.connections(), 1);
+});
+
+test('standalone options reject invalid endpoints, codes, timeout and ambiguous cached registrations', () => {
+  const base = 'https://krajcik.github.io/lampa-remote/plugin/remote.js';
+  for (const value of [null, [], { socket: 'ws://example.org/tv' }, { port: 0 }, { port: 65536 }, { browserWakeCode: '119' }, { wakeTimeoutMs: 60001 }, { constructor: 1 }]) {
+    const f = pluginFixture({ autoWake: false, installUrl: base + '#lampa-remote=' + encodeURIComponent(JSON.stringify(value)) });
+    assert.equal(f.window.__lampaRemote, undefined); assert.equal(f.listeners.size, 0); assert.equal(f.connections(), 0);
+  }
+  const f = pluginFixture({ autoWake: false, cached: true, storedPlugins: [{ url: base, status: 1 }, { url: base + '#lampa-remote=%7B%22port%22%3A20000%7D', status: 1 }] });
+  assert.equal(f.window.__lampaRemote, undefined); assert.equal(f.listeners.size, 0);
+});
 
 test('clock skew does not expire a newly received command; stale queued actions never execute', async t => {
   const f = pluginFixture({ clockSkew: 60000 }); t.after(f.stop);

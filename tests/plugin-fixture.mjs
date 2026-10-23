@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew = 0, reflectInput = false, autoWake = true, hiddenMirror = false, unrelatedMirror = false, extraMirror = false, rows = [], replaceRows = false, remoteConfig = {}, onAction, onFocus, screensaver = null, hitTesting = {} } = {}) {
+export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew = 0, reflectInput = false, autoWake = true, hiddenMirror = false, unrelatedMirror = false, extraMirror = false, rows = [], replaceRows = false, remoteConfig = {}, cached = false, storedPlugins, installUrl, onAction, onFocus, screensaver = null, hitTesting = {} } = {}) {
   let monotonic = 0;
   const sent = [], moved = [], listeners = new Map(), timers = new Set();
   let connections = 0;
@@ -41,7 +41,9 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
   const saver = screensaver && { active: !!screensaver.active, overlayVisible: !!screensaver.active, resets: 0, stops: 0 };
   const overlay = element('Screensaver'); Object.defineProperty(overlay, 'hidden', { get: () => !saver?.overlayVisible });
   const nodes = [field, appMirror, extraMirror ? otherMirror : null, secretRow, backgroundRow, settingsButton, overlay, ...scenarioRows].filter(Boolean);
+  const scriptUrl = installUrl || 'https://krajcik.github.io/lampa-remote/plugin/remote.js#lampa-remote=' + encodeURIComponent(JSON.stringify({ wakeTimeoutMs: 30, ...remoteConfig }));
   const document = {
+    currentScript: cached ? null : { src: scriptUrl },
     hidden: false, visibilityState: 'visible', activeElement: field,
     head: { querySelectorAll: () => hitTesting.styles || [] },
     body: { classList: { contains: () => true } },
@@ -56,14 +58,14 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
   };
   class Socket {
     static current;
-    constructor() { connections++; Socket.current = this; this.readyState = 0; }
+    constructor(url) { connections++; Socket.current = this; this.url = url; this.readyState = 0; }
     send(value) { sent.push(JSON.parse(value)); }
     close() { this.readyState = 3; this.onclose?.(); }
   }
   class WallClock extends Date { static now() { return Date.now() + clockSkew; } }
   const window = { appready: true, addEventListener: (name, fn, capture) => listeners.set(name, { fn, capture }), removeEventListener: name => listeners.delete(name) };
   const sandbox = {
-    window, document, console: { warn() {}, error() {} }, location: { origin: 'http://test' }, innerWidth: 1000, innerHeight: 1000,
+    window, document, console: { warn() {}, error() {} }, location: { origin: 'http://lampa.mx' }, innerWidth: 1000, innerHeight: 1000,
     getComputedStyle: el => ({ display: el.hidden ? 'none' : 'block', visibility: 'visible', opacity: '1' }),
     setTimeout: (fn, ms) => { const handle = setTimeout(() => { timers.delete(handle); fn(); }, ms); timers.add(handle); return handle; }, clearTimeout: handle => { timers.delete(handle); clearTimeout(handle); }, requestAnimationFrame: fn => queueMicrotask(fn), WebSocket: Socket, performance: { now: () => monotonic }, Date: WallClock,
     Event: class { constructor(type) { this.type = type; } },
@@ -72,13 +74,14 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
       Screensaver: saver ? { isWorked: () => saver.active, resetTimer: () => { saver.resets++; }, stop: () => { saver.stops++; saver.active = false; } } : undefined,
       Controller: { enabled: () => ({ name: controllerName }), move: key => moved.push(key), collectionFocus: el => onFocus?.(el) },
       Params: { defaults: { jackett_key: '', background: true } },
-      Storage: { field: key => key === 'jackett_key' ? 'DUMMY1234' : background },
+      Storage: { get: () => storedPlugins || [{ url: scriptUrl, status: 1 }], field: key => key === 'jackett_key' ? 'DUMMY1234' : background },
       Utils: { trigger: element => { actions++; if (element === backgroundRow) background = !background; onAction?.(element); } },
       Settings: { listener: { follow: (_, fn) => { settingsListener = fn; }, remove: () => { settingsListener = undefined; } } }, Listener: { follow() {}, remove() {} },
     },
   };
-  const source = readFileSync(new URL('../plugin/remote.js', import.meta.url), 'utf8').replace('__REMOTE_CONFIG__', JSON.stringify({ token: 'test', socket: 'ws://test', version: '0.2.0', protocolVersion: 1, sourceHash: 'fixture', browserWakeCode: 119, wakeTimeoutMs: 30, ...remoteConfig }));
-  vm.runInNewContext(source, sandbox);
+  const source = readFileSync(new URL('../plugin/remote.js', import.meta.url), 'utf8');
+  const run = () => vm.runInNewContext(source, sandbox);
+  run();
   function wake(type = 'keydown', repeat = false, code = 119) {
     let prevented = false, stopped = false;
     const event = { type, repeat, keyCode: code, preventDefault: () => { prevented = true; }, stopImmediatePropagation: () => { stopped = true; } };
@@ -102,5 +105,5 @@ export function pluginFixture({ mirror = 'old', fieldName = 'query', clockSkew =
     }
     assert.fail('Plugin did not respond to ' + id);
   }
-  return { send, response, sent, moved, field, appMirror, saver, finishFade: () => { saver.overlayVisible = false; }, rows: scenarioRows, setController: name => { controllerName = name; }, setSection: name => settingsListener?.({ name }), setBackground: value => { background = value; }, advance: ms => { monotonic += ms; }, stop: () => window.__lampaRemote.stop(), socket: Socket.current, actions: () => actions, warn: message => sandbox.console.warn(message), wake, open, connections: () => connections, timers: () => timers.size, listeners, getSocket: () => Socket.current };
+  return { window, run, send, response, sent, moved, field, appMirror, saver, finishFade: () => { saver.overlayVisible = false; }, rows: scenarioRows, setController: name => { controllerName = name; }, setSection: name => settingsListener?.({ name }), setBackground: value => { background = value; }, advance: ms => { monotonic += ms; }, stop: () => window.__lampaRemote.stop(), socket: Socket.current, actions: () => actions, warn: message => sandbox.console.warn(message), wake, open, connections: () => connections, timers: () => timers.size, listeners, getSocket: () => Socket.current };
 }

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 
 export const version: string = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
-export const protocolVersion = 1;
+export const protocolVersion = 2;
 export const methods = ['status', 'ui', 'action', 'key', 'input', 'settings.get', 'settings.set', 'settings.open', 'player', 'logs'] as const;
 export type Method = typeof methods[number];
 export type Params = Record<string, unknown>;

@@ -37,7 +37,7 @@ test('help/version work through a symlink without TV or creating configuration',
   assert.equal(help.stderr, '');
   const version = await cli(directory, ['--version']);
   assert.equal(version.status, 0, version.stderr);
-  assert.match(version.stdout, /^0\.2\.0\n$/);
+  assert.match(version.stdout, /^0\.3\.0\n$/);
   assert.throws(() => readFileSync(join(directory, 'config.json')), { code: 'ENOENT' });
 });
 
@@ -54,37 +54,39 @@ test('argument errors have stable JSON stderr/exit 2 and never contact the TV', 
   assert.throws(() => readFileSync(join(directory, 'config.json')), { code: 'ENOENT' });
 });
 
-test('install-url writes a private file; stdout/stderr never contain its credential', async t => {
+test('install-url prints a public standalone URL without token or private URL files', async t => {
   const directory = state(t);
   const result = await cli(directory, ['install-url']);
   assert.equal(result.status, 0, result.stderr);
-  const config = JSON.parse(readFileSync(join(directory, 'config.json'), 'utf8'));
-  const output = JSON.parse(result.stdout);
-  assert.deepEqual(output, { ok: true, data: { file: join(directory, 'install-url.txt') } });
-  assert.doesNotMatch(result.stdout + result.stderr, new RegExp(config.token));
-  assert.equal(statSync(output.data.file).mode & 0o777, 0o600);
-  assert.equal(statSync(join(directory, 'config.json')).mode & 0o777, 0o600);
-  const url = new URL(readFileSync(output.data.file, 'utf8').trim());
-  assert.ok(url.href.length <= 300, 'Lampa rejects plugin URLs longer than 300 characters');
-  assert.equal(url.origin + url.pathname, 'https://krajcik.github.io/lampa-remote/plugin/loader.js');
-  assert.doesNotMatch(url.origin + url.pathname + url.search, new RegExp(config.token));
-  assert.deepEqual(JSON.parse(decodeURIComponent(url.hash.slice('#lampa-remote='.length))), {
-    url: `http://127.0.0.1:${config.port}/plugin.js?token=${config.token}`,
-    browserWakeCode: config.browserWakeCode, wakeTimeoutMs: config.wakeTimeoutMs,
-  });
+  assert.deepEqual(JSON.parse(result.stdout), { ok: true, data: { url: 'https://krajcik.github.io/lampa-remote/plugin/remote.js?v=0.3.0#' } });
+  const file = join(directory, 'config.json');
+  const config = JSON.parse(readFileSync(file, 'utf8'));
+  const returned = JSON.parse(result.stdout).data.url;
+  const lampaRequest = new URL(returned + (returned.includes('?') ? '&' : '?') + 'email=FAKE_ACCOUNT&logged=true');
+  assert.doesNotMatch(lampaRequest.search, /email|logged|FAKE_ACCOUNT/, 'Lampa account metadata must remain in the fragment');
+  assert.equal(Object.hasOwn(config, 'token'), false);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.throws(() => readFileSync(join(directory, 'install-url.txt')), { code: 'ENOENT' });
+  writeFileSync(file, JSON.stringify({ ...config, token, port: 20000, browserWakeCode: 120, wakeTimeoutMs: 500 }), { mode: 0o600 });
+  const custom = await cli(directory, ['install-url']);
+  assert.equal(custom.status, 0, custom.stderr);
+  assert.doesNotMatch(custom.stdout + custom.stderr, new RegExp(token));
+  const url = new URL(JSON.parse(custom.stdout).data.url);
+  assert.ok(url.href.length <= 300);
+  assert.deepEqual(JSON.parse(decodeURIComponent(url.hash.slice('#lampa-remote='.length))), { port: 20000, browserWakeCode: 120, wakeTimeoutMs: 500 });
 });
 
 test('CLI emits JSON success on stdout, state errors on stderr, and redacts credentials', async t => {
   const directory = state(t);
-  const bridge = createBridge({ token, port: 0 }); const port = await bridge.listen(); t.after(() => bridge.close());
+  const bridge = createBridge({ port: 0 }); const port = await bridge.listen(); t.after(() => bridge.close());
   writeFileSync(join(directory, 'config.json'), JSON.stringify({ token, port }), { mode: 0o600 });
   const disconnected = await cli(directory, ['status']);
   assert.equal(disconnected.status, 3);
   assert.equal(disconnected.stdout, '');
   assert.equal(JSON.parse(disconnected.stderr).error.code, 'ADB_NO_DEVICE');
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/tv?token=${token}`); await once(ws, 'open');
-  const h = (await (await fetch(`http://127.0.0.1:${port}/health?passive=1`, { headers: { Authorization: `Bearer ${token}` } })).json()).data;
-  ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 1, pluginVersion: h.version, sourceHash: h.sourceHash, browserWakeCode: 119, appready: true } }));
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/tv`, { origin: 'http://lampa.mx' }); await once(ws, 'open');
+  const h = (await (await fetch(`http://127.0.0.1:${port}/health?passive=1`, { headers: { 'Content-Type': 'application/json' } })).json()).data;
+  ws.send(JSON.stringify({ type: 'hello', data: { protocolVersion: 2, pluginVersion: h.version, browserWakeCode: 119, origin: 'http://lampa.mx', appready: true } }));
   ws.on('message', message => {
     const r = JSON.parse(message);
     if (r.method === 'settings.get') ws.send(JSON.stringify({ id: r.id, error: { code: 'SETTING_NOT_AVAILABLE' } }));

@@ -12,7 +12,7 @@ export async function request(c: Config, path: string, body?: unknown, signal?: 
   let response: Response;
   try {
     response = await fetch(`http://127.0.0.1:${c.port}${path}`, {
-      headers: { Authorization: `Bearer ${c.token}`, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       method: body === undefined ? 'GET' : 'POST', body: body === undefined ? undefined : JSON.stringify(body),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(c.rpcTimeoutMs + 2000)]) : AbortSignal.timeout(c.rpcTimeoutMs + 2000),
     });
@@ -31,7 +31,7 @@ export async function request(c: Config, path: string, body?: unknown, signal?: 
   if (!data.ok) {
     const e = data.error as Params;
     if (typeof e.code !== 'string' || typeof e.message !== 'string') throw new RemoteError('INVALID_BRIDGE_RESPONSE', 'Invalid error envelope from the bridge.', 4);
-    const exit = e.code === 'INTERNAL_ERROR' ? 1 : response.status >= 500 || e.outcome === 'unknown' ? 4 : response.status === 400 || response.status === 404 || response.status === 413 ? 2 : 3;
+    const exit = e.code === 'INTERNAL_ERROR' ? 1 : response.status >= 500 || e.outcome === 'unknown' ? 4 : response.status === 400 || response.status === 404 || response.status === 413 || response.status === 415 ? 2 : 3;
     throw new RemoteError(e.code, e.message, exit, typeof e.hint === 'string' ? e.hint : undefined, e.outcome === 'unknown' ? 'unknown' : undefined);
   }
   return data as Envelope & { ok: true };
@@ -93,7 +93,7 @@ export async function lease(c: Config): Promise<() => Promise<void>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), c.wakeTimeoutMs);
   let response: Response;
-  try { response = await fetch(`http://127.0.0.1:${c.port}/lease`, { headers: { Authorization: `Bearer ${c.token}` }, signal: controller.signal }); }
+  try { response = await fetch(`http://127.0.0.1:${c.port}/lease`, { signal: controller.signal }); }
   catch { throw new RemoteError('BRIDGE_TRANSPORT_ERROR', 'Could not acquire an active CLI lease.', 4); }
   finally { clearTimeout(timer); }
   if (!response.ok) { await response.body?.cancel(); throw new RemoteError('BRIDGE_LEASE_REJECTED', 'The bridge refused an active CLI lease.', 3); }
@@ -145,7 +145,7 @@ export async function doctor(c: Config): Promise<{ checks: Params; error?: Remot
     if (h.ready) {
       try {
         const live = (await request(c, '/rpc', { method: 'status', params: {} })).data;
-        if (!isObject(live) || live.protocolVersion !== protocolVersion || live.pluginVersion !== version || live.sourceHash !== h.sourceHash || live.appready !== true) {
+        if (!isObject(live) || live.protocolVersion !== protocolVersion || live.pluginVersion !== version || live.browserWakeCode !== c.browserWakeCode || live.origin !== c.appOrigin || live.appready !== true) {
           checks.protocol = failed(new RemoteError('PROTOCOL_MISMATCH', 'The live plugin status did not match its handshake.', 3, 'Reload the installed plugin.'));
         } else {
           checks.plugin = { ok: true, screensaverActive: typeof live.screensaverActive === 'boolean' ? live.screensaverActive : null,
